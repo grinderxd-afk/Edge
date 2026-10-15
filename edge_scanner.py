@@ -260,8 +260,9 @@ class Client:
       * every endpoint has a 1000 ms cooldown, so calls are spaced by `gap` seconds
     """
 
-    def __init__(self, key, base_url, max_requests, gap=1.1):
+    def __init__(self, key, base_url, max_requests, gap=1.1, retry_wait=5.0):
         self.key = key
+        self.retry_wait = retry_wait
         self.base = base_url.rstrip("/")
         self.max_requests = max_requests
         self.gap = gap
@@ -301,6 +302,14 @@ class Client:
                     if attempt < 2:
                         time.sleep(2)
                         continue
+                if e.code >= 500:
+                    # OddsPapi's own servers hiccup now and then. The free account call is retried twice; calls that
+                    # use up requests (they're counted even when they fail) are retried once.
+                    if attempt + 1 < (2 if billable else 3):
+                        time.sleep(self.retry_wait * (attempt + 1))
+                        continue
+                    raise ApiError(f"OddsPapi had a server problem (HTTP {e.code} from {path}). It's usually temporary: "
+                                   f"wait a few minutes and run again. Details: {body[:200]}")
                 raise ApiError(f"HTTP {e.code} from {path}: {body[:300]}")
             except urllib.error.URLError as e:
                 raise ApiError(f"Couldn't reach OddsPapi: {e.reason}")
@@ -315,7 +324,8 @@ def make_client(cfg):
         raise SystemExit(
             "No API key found. Set ODDSPAPI_KEY, or create a file named .env next to this script "
             "containing:  ODDSPAPI_KEY=your-key")
-    return Client(key, cfg["base_url"], int(cfg["max_requests_per_run"]), float(cfg.get("request_gap_seconds", 1.1)))
+    return Client(key, cfg["base_url"], int(cfg["max_requests_per_run"]), float(cfg.get("request_gap_seconds", 1.1)),
+                  float(cfg.get("retry_wait_seconds", 5)))
 
 
 def get_subscription(client):
@@ -753,12 +763,17 @@ def live_events(now, cfg, client):
         raise SystemExit(f"This run needs {needed} requests but max_requests_per_run is {client.max_requests}. "
                          "Remove a sport or raise the limit in config.json.")
 
-    sub = get_subscription(client)                       # free
+    try:
+        sub = get_subscription(client)                   # free, and only used for the quota check
+    except ApiError as e:
+        print(f"Couldn't read your account info ({e}). Carrying on without the quota check.")
+        sub = {}
     limit, used = sub.get("request_limit"), sub.get("request_count")
     if isinstance(limit, (int, float)) and isinstance(used, (int, float)) and limit - used < needed:
         raise SystemExit(f"Only {int(limit - used)} requests left on your plan and this run needs {needed}. "
                          "Stopping so nothing is wasted.")
-    print(f"Before this run: {quota_text(sub)}. This run will use up to {needed}.")
+    if sub:
+        print(f"Before this run: {quota_text(sub)}. This run will use up to {needed}.")
 
     stats = Counter()
     events = []
