@@ -1,0 +1,58 @@
+name: Daily picks
+
+on:
+  schedule:
+    # 12:17 UTC every day. GitHub often starts scheduled runs a little late, so avoid exact-hour times.
+    - cron: "17 12 * * *"
+  workflow_dispatch:        # adds a "Run workflow" button so you can refresh on demand, even from your phone
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install the lock library
+        run: pip install cryptography
+
+      - name: Build the page
+        env:
+          ODDSPAPI_KEY: ${{ secrets.ODDSPAPI_KEY }}
+          PAGE_PASSWORD: ${{ secrets.PAGE_PASSWORD }}
+        run: |
+          mkdir -p site
+          if [ -n "$PAGE_PASSWORD" ]; then
+            python edge_scanner.py --live --lock --out site/index.html
+          else
+            echo "WARNING: no PAGE_PASSWORD secret is set, so the page will be public and unlocked."
+            python edge_scanner.py --live --out site/index.html
+          fi
+
+      - uses: actions/configure-pages@v5
+
+      - uses: actions/upload-pages-artifact@v4
+        with:
+          path: site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
