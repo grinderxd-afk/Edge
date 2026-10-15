@@ -1,0 +1,499 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="light dark">
+<title>Edge scanner</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Schibsted+Grotesk:wght@400;500;700&display=swap" rel="stylesheet">
+<style>
+  /* Palette: chalk (page), paper (cards), ink (text), slate (secondary text),
+     ultramarine (the minimum odds number, the only accent), pine (meets your edge), brick (below it). */
+  :root {
+    --chalk: #EEF2F1;
+    --paper: #FFFFFF;
+    --ink: #14262B;
+    --slate: #566A6F;
+    --rule: #D3DDDC;
+    --ultramarine: #2D3FE0;
+    --pine: #17784A;
+    --pine-wash: #E3F3EA;
+    --brick: #B3402F;
+    --amber: #8A5A00;
+    --amber-wash: #FFF1D6;
+    --radius: 10px;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --chalk: #0E1A1D;
+      --paper: #15262A;
+      --ink: #E6EEEE;
+      --slate: #9BAFB3;
+      --rule: #2A3D41;
+      --ultramarine: #9AA8FF;
+      --pine: #5CCB92;
+      --pine-wash: #16342A;
+      --brick: #F29A8A;
+      --amber: #F0C070;
+      --amber-wash: #3A2E12;
+    }
+  }
+
+  * { box-sizing: border-box; }
+  html { -webkit-text-size-adjust: 100%; }
+  body {
+    margin: 0;
+    background: var(--chalk);
+    color: var(--ink);
+    font-family: "Schibsted Grotesk", system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    font-size: 16px;
+    line-height: 1.45;
+    font-variant-numeric: tabular-nums;
+    padding: calc(16px + env(safe-area-inset-top, 0px)) calc(14px + env(safe-area-inset-right, 0px))
+             calc(32px + env(safe-area-inset-bottom, 0px)) calc(14px + env(safe-area-inset-left, 0px));
+  }
+  main { max-width: 1080px; margin: 0 auto; }
+  :focus-visible { outline: 2px solid var(--ultramarine); outline-offset: 2px; }
+  .sr-only {
+    position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0;
+    overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0;
+  }
+
+  h1 { font-size: 1.6rem; line-height: 1.15; font-weight: 700; margin: 0 0 4px; letter-spacing: -0.01em; }
+  .freshness { margin: 0 0 12px; color: var(--slate); font-size: 0.92rem; }
+  .freshness.stale { color: var(--amber); font-weight: 500; }
+  .banner {
+    margin: 0 0 14px; padding: 10px 14px; border-radius: var(--radius);
+    background: var(--amber-wash); color: var(--amber); font-size: 0.92rem;
+  }
+
+  /* Controls */
+  .chips { display: flex; flex-wrap: wrap; gap: 8px; margin: 0 0 14px; }
+  .chip {
+    font: inherit; font-weight: 500; min-height: 44px; padding: 8px 16px;
+    border-radius: 999px; border: 1px solid var(--rule);
+    background: transparent; color: var(--ink); cursor: pointer;
+  }
+  .chip[aria-pressed="true"] { background: var(--ink); color: var(--chalk); border-color: var(--ink); }
+  .chip:disabled { background: transparent; color: var(--slate); border-style: dashed; opacity: 0.7; cursor: default; }
+
+  .controls { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin: 0 0 12px; }
+  .field label { display: block; font-size: 0.84rem; color: var(--slate); margin-bottom: 4px; }
+  .field input, .field select {
+    width: 100%; min-height: 44px; padding: 8px 12px; font: inherit; font-size: 1rem;
+    color: var(--ink); background: var(--paper);
+    border: 1px solid var(--rule); border-radius: 8px;
+  }
+  details.more { margin: 0 0 14px; }
+  details.more summary { cursor: pointer; min-height: 44px; display: flex; align-items: center; color: var(--slate); font-weight: 500; }
+  details.more .controls { margin-top: 4px; }
+
+  .summary { margin: 0 0 10px; font-weight: 500; }
+
+  /* Table (desktop) */
+  .table-wrap { background: var(--paper); border: 1px solid var(--rule); border-radius: var(--radius); overflow-x: auto; }
+  table { width: 100%; border-collapse: collapse; }
+  th, td { padding: 12px 14px; text-align: left; vertical-align: middle; }
+  thead th { font-size: 0.84rem; font-weight: 500; color: var(--slate); border-bottom: 1px solid var(--rule); white-space: nowrap; }
+  tbody td { border-top: 1px solid var(--rule); }
+  tbody tr:first-child td { border-top: 0; }
+  .r { text-align: right; }
+  tr.hit td:first-child { box-shadow: inset 3px 0 0 var(--pine); }
+
+  .event-name { font-weight: 700; }
+  .event-meta { display: flex; flex-wrap: wrap; gap: 0 14px; color: var(--slate); font-size: 0.86rem; }
+  .pick-name { font-weight: 500; }
+  .market { color: var(--slate); font-size: 0.86rem; }
+  .flag {
+    display: inline-block; margin-top: 4px; padding: 2px 8px; border-radius: 999px;
+    font-size: 0.78rem; font-weight: 500; color: var(--pine); background: var(--pine-wash);
+  }
+  .min .num { font-size: 1.4rem; font-weight: 700; color: var(--ultramarine); }
+  .edge { margin-left: 6px; font-size: 0.86rem; font-weight: 500; }
+  .edge.pos { color: var(--pine); }
+  .edge.neg { color: var(--brick); }
+  .na { color: var(--slate); }
+  body.no-compare .b365 { display: none; }
+  .stake-amt { color: var(--slate); margin-left: 6px; font-size: 0.86rem; }
+
+  .empty { padding: 28px 16px; text-align: center; color: var(--slate); background: var(--paper); border: 1px solid var(--rule); border-radius: var(--radius); }
+
+  .notes { margin: 20px 0 0; color: var(--slate); font-size: 0.88rem; max-width: 70ch; }
+  .notes p { margin: 0 0 8px; }
+
+  /* Phone: each pick becomes a card */
+  @media (max-width: 759px) {
+    .table-wrap { background: transparent; border: 0; overflow: visible; }
+    table, tbody { display: block; }
+    thead { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
+    tr {
+      display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 2px 10px;
+      background: var(--paper); border: 1px solid var(--rule); border-radius: var(--radius);
+      padding: 12px 14px; margin: 0 0 10px;
+    }
+    td { display: block; padding: 0; border: 0 !important; text-align: left; box-shadow: none !important; }
+    tr.hit { border-color: var(--pine); box-shadow: inset 4px 0 0 var(--pine); }
+    td.event { grid-column: 1 / 4; grid-row: 1; }
+    td.pick  { grid-column: 1 / 4; grid-row: 2; padding-bottom: 8px; }
+    td.min   { grid-column: 4; grid-row: 1 / 3; text-align: right; align-self: center; }
+    td.min .num { font-size: 1.9rem; line-height: 1.05; display: block; }
+    td.min::before { text-align: right; }
+    td.stat::before, td.min::before {
+      content: attr(data-label); display: block; font-size: 0.74rem; font-weight: 500; color: var(--slate);
+    }
+    td.stat { grid-row: 3; padding-top: 8px; border-top: 1px solid var(--rule) !important; }
+    .edge { display: block; margin-left: 0; }
+    .stake-amt { display: block; margin-left: 0; }
+    .r { text-align: left; }
+  }
+</style>
+</head>
+<body>
+<main>
+  <h1>Edge scanner</h1>
+  <p class="freshness" id="freshness"></p>
+  <p class="banner" id="sample-banner" hidden>Sample data. These matches and prices are made up, so you can check the layout and the math.</p>
+  <noscript><p class="banner">This page needs JavaScript to show the table.</p></noscript>
+
+  <div class="chips" id="chips" role="group" aria-label="Sports"></div>
+
+  <div class="controls">
+    <div class="field">
+      <label for="edge">Minimum edge (%)</label>
+      <input id="edge" type="number" inputmode="decimal" min="0" max="25" step="0.5">
+    </div>
+    <div class="field">
+      <label for="within">Starts within</label>
+      <select id="within">
+        <option value="24">24 hours</option>
+        <option value="48">48 hours</option>
+        <option value="168">7 days</option>
+        <option value="0">Any time</option>
+      </select>
+    </div>
+    <div class="field">
+      <label for="sort">Sort by</label>
+      <select id="sort">
+        <option value="time">Start time</option>
+        <option value="edge">Bet365 edge</option>
+        <option value="prob">True probability</option>
+      </select>
+    </div>
+  </div>
+
+  <details class="more">
+    <summary>Stake and filters</summary>
+    <div class="controls">
+      <div class="field">
+        <label for="minprob">Hide picks under (% probability)</label>
+        <input id="minprob" type="number" inputmode="decimal" min="0" max="50" step="1">
+      </div>
+      <div class="field">
+        <label for="kelly">Stake size</label>
+        <select id="kelly">
+          <option value="0.25">Quarter Kelly</option>
+          <option value="0.5">Half Kelly</option>
+        </select>
+      </div>
+      <div class="field">
+        <label for="cap">Max stake per bet (% of bankroll)</label>
+        <input id="cap" type="number" inputmode="decimal" min="0.1" max="25" step="0.5">
+      </div>
+      <div class="field">
+        <label for="bankroll">Bankroll (optional)</label>
+        <input id="bankroll" type="number" inputmode="decimal" min="0" step="any" placeholder="Adds amounts to stakes">
+      </div>
+    </div>
+  </details>
+
+  <p class="summary" id="summary" role="status"></p>
+
+  <div class="table-wrap" id="table-wrap">
+    <table>
+      <caption class="sr-only">Picks with the minimum odds to look for</caption>
+      <thead>
+        <tr>
+          <th scope="col">Event</th>
+          <th scope="col">Pick</th>
+          <th scope="col" class="r">True prob.</th>
+          <th scope="col" class="r">Fair odds</th>
+          <th scope="col" class="r">Min odds</th>
+          <th scope="col" class="r b365">Bet365</th>
+          <th scope="col" class="r">Stake</th>
+        </tr>
+      </thead>
+      <tbody id="rows"></tbody>
+    </table>
+  </div>
+  <p class="empty" id="empty" hidden></p>
+
+  <section class="notes" aria-label="How to read this">
+    <p><strong>Min odds</strong> is the lowest decimal price worth taking at your book: (1 + minimum edge) ÷ true probability. Use it only on the same market and line, such as the same total or spread number.</p>
+    <p><strong>True probability</strong> is the <span id="sharp-name"></span> price with its margin removed (<span id="devig-name"></span>). It's an estimate, not a certainty.</p>
+    <p><strong>Stake</strong> is fractional Kelly sized at the min odds and capped. Better odds than the min mean more edge than you asked for.</p>
+  </section>
+</main>
+
+<script id="data" type="application/json">__DATA_JSON__</script>
+<script>
+(function () {
+  "use strict";
+
+  var DATA = JSON.parse(document.getElementById("data").textContent);
+  var KEY = "edge-scanner-settings-v1";
+
+  function clampNum(v, min, max, fallback) {
+    var n = typeof v === "number" ? v : parseFloat(v);
+    if (!isFinite(n)) return fallback;
+    return Math.min(max, Math.max(min, n));
+  }
+
+  var state = loadState();
+
+  function loadState() {
+    var s = { sports: DATA.sports.slice(), edge: 3, within: 48, sort: "time", minProb: 5, kelly: 0.25, cap: 2, bankroll: "" };
+    try {
+      var saved = JSON.parse(localStorage.getItem(KEY) || "null");
+      if (saved && typeof saved === "object") {
+        if (Array.isArray(saved.sports)) {
+          var keep = saved.sports.filter(function (x) { return DATA.sports.indexOf(x) !== -1; });
+          if (keep.length) s.sports = keep;
+        }
+        s.edge = clampNum(saved.edge, 0, 25, s.edge);
+        if ([0, 24, 48, 168].indexOf(saved.within) !== -1) s.within = saved.within;
+        if (["time", "edge", "prob"].indexOf(saved.sort) !== -1) s.sort = saved.sort;
+        s.minProb = clampNum(saved.minProb, 0, 50, s.minProb);
+        if (saved.kelly === 0.25 || saved.kelly === 0.5) s.kelly = saved.kelly;
+        s.cap = clampNum(saved.cap, 0.1, 25, s.cap);
+        if (typeof saved.bankroll === "number" && saved.bankroll > 0) s.bankroll = saved.bankroll;
+      }
+    } catch (e) { /* storage unavailable: use defaults */ }
+    return s;
+  }
+
+  function saveState() {
+    try { localStorage.setItem(KEY, JSON.stringify(state)); } catch (e) { /* ignore */ }
+  }
+
+  // ---------- helpers ----------
+  function el(tag, cls, text) {
+    var n = document.createElement(tag);
+    if (cls) n.className = cls;
+    if (text != null) n.textContent = text;
+    return n;
+  }
+  function cell(cls, label) {
+    var t = document.createElement("td");
+    t.className = cls;
+    if (label) t.setAttribute("data-label", label);
+    return t;
+  }
+  function pct(x, digits) { return (x * 100).toFixed(digits == null ? 1 : digits) + "%"; }
+  function signedPct(x) { return (x >= 0 ? "+" : "\u2212") + Math.abs(x * 100).toFixed(1) + "%"; }
+
+  var timeFmt = new Intl.DateTimeFormat(undefined, { hour: "numeric", minute: "2-digit" });
+  var dayFmt = new Intl.DateTimeFormat(undefined, { weekday: "short" });
+  function startOfDay(d) { return new Date(d.getFullYear(), d.getMonth(), d.getDate()); }
+  function whenLabel(iso) {
+    var d = new Date(iso), n = new Date();
+    var diff = Math.round((startOfDay(d) - startOfDay(n)) / 86400000);
+    var day = diff === 0 ? "Today" : diff === 1 ? "Tomorrow" : dayFmt.format(d);
+    return day + " " + timeFmt.format(d);
+  }
+  function ageText(ms) {
+    var m = Math.floor(ms / 60000);
+    if (m < 1) return "just now";
+    if (m < 60) return m + " min ago";
+    var h = Math.floor(m / 60);
+    if (h < 48) return h + " h ago";
+    return Math.floor(h / 24) + " days ago";
+  }
+
+  // ---------- controls ----------
+  var chipsEl = document.getElementById("chips");
+  var counts = {};
+  DATA.rows.forEach(function (r) { counts[r.sport] = (counts[r.sport] || 0) + 1; });
+  DATA.sports.forEach(function (sp) {
+    var b = el("button", "chip", counts[sp] ? sp : sp + " (none)");
+    if (!counts[sp]) { b.disabled = true; b.title = "No " + sp + " games in this data"; }
+    b.type = "button";
+    b.setAttribute("aria-pressed", state.sports.indexOf(sp) !== -1 ? "true" : "false");
+    b.addEventListener("click", function () {
+      var i = state.sports.indexOf(sp);
+      if (i === -1) state.sports.push(sp); else state.sports.splice(i, 1);
+      b.setAttribute("aria-pressed", i === -1 ? "true" : "false");
+      saveState(); render();
+    });
+    chipsEl.appendChild(b);
+  });
+
+  function bindNumber(id, key, min, max) {
+    var input = document.getElementById(id);
+    input.value = state[key];
+    input.addEventListener("input", function () {
+      state[key] = clampNum(input.value, min, max, state[key]);
+      saveState(); render();
+    });
+    input.addEventListener("change", function () { input.value = state[key]; });
+  }
+  bindNumber("edge", "edge", 0, 25);
+  bindNumber("minprob", "minProb", 0, 50);
+  bindNumber("cap", "cap", 0.1, 25);
+
+  var sortEl = document.getElementById("sort");
+  sortEl.value = state.sort;
+  sortEl.addEventListener("change", function () { state.sort = sortEl.value; saveState(); render(); });
+
+  var withinEl = document.getElementById("within");
+  withinEl.value = String(state.within);
+  withinEl.addEventListener("change", function () { state.within = parseInt(withinEl.value, 10); saveState(); render(); });
+
+  var kellyEl = document.getElementById("kelly");
+  kellyEl.value = String(state.kelly);
+  kellyEl.addEventListener("change", function () { state.kelly = parseFloat(kellyEl.value); saveState(); render(); });
+
+  var bankEl = document.getElementById("bankroll");
+  bankEl.value = state.bankroll;
+  bankEl.addEventListener("input", function () {
+    var n = parseFloat(bankEl.value);
+    state.bankroll = isFinite(n) && n > 0 ? n : "";
+    saveState(); render();
+  });
+
+  // ---------- static text ----------
+  document.getElementById("sharp-name").textContent = DATA.sharp_book;
+  document.getElementById("devig-name").textContent = DATA.devig;
+  document.getElementById("sample-banner").hidden = DATA.source !== "sample";
+
+  // ---------- calculation ----------
+  function compute(r) {
+    var e = state.edge / 100;
+    var min = Math.ceil(((1 + e) / r.p) * 100 - 1e-9) / 100;       // round up to the cent
+    var b = r.bet365;
+    var out = {
+      r: r,
+      min: min,
+      edge: b != null ? r.p * b - 1 : null,
+      hit: b != null && b >= min - 1e-9,
+      stake: 0
+    };
+    var kellyFull = (r.p * min - 1) / (min - 1);                    // sized at the min odds
+    out.stake = Math.max(0, Math.min(state.cap, kellyFull * state.kelly * 100));
+    return out;
+  }
+
+  function buildRow(c) {
+    var r = c.r;
+    var tr = document.createElement("tr");
+    if (c.hit) tr.className = "hit";
+
+    var tdEvent = cell("event");
+    tdEvent.appendChild(el("div", "event-name", r.event));
+    var meta = el("div", "event-meta");
+    meta.appendChild(el("span", null, r.league));
+    var time = el("time", null, whenLabel(r.start));
+    time.setAttribute("datetime", r.start);
+    meta.appendChild(time);
+    tdEvent.appendChild(meta);
+
+    var tdPick = cell("pick");
+    tdPick.appendChild(el("div", "pick-name", r.selection));
+    tdPick.appendChild(el("div", "market", r.market));
+    if (c.hit) tdPick.appendChild(el("span", "flag", "Bet365 meets your edge"));
+
+    var tdProb = cell("stat r", "True prob.");
+    tdProb.textContent = pct(r.p);
+
+    var tdFair = cell("stat r", "Fair odds");
+    tdFair.textContent = r.fair.toFixed(2);
+
+    var tdMin = cell("min r", "Min odds");
+    tdMin.appendChild(el("span", "num", c.min.toFixed(2)));
+
+    var tdB = cell("stat r b365", "Bet365");
+    if (r.bet365 != null) {
+      tdB.appendChild(el("span", "odds", r.bet365.toFixed(2)));
+      tdB.appendChild(el("span", "edge " + (c.edge >= 0 ? "pos" : "neg"), signedPct(c.edge)));
+    } else {
+      var na = el("span", "na", "n/a");
+      na.setAttribute("title", "Bet365 price not available");
+      tdB.appendChild(na);
+    }
+
+    var tdStake = cell("stat r", "Stake");
+    tdStake.appendChild(el("span", "stake-pct", c.stake.toFixed(1) + "%"));
+    if (state.bankroll !== "") {
+      tdStake.appendChild(el("span", "stake-amt", "(" + Math.round(state.bankroll * c.stake / 100).toLocaleString() + ")"));
+    }
+
+    [tdEvent, tdPick, tdProb, tdFair, tdMin, tdB, tdStake].forEach(function (t) { tr.appendChild(t); });
+    return tr;
+  }
+
+  // ---------- render ----------
+  function render() {
+    var hasCompare = DATA.rows.some(function (r) { return r.bet365 != null; });
+    document.body.classList.toggle("no-compare", !hasCompare);          // hide the Bet365 column when there's no data for it
+    var edgeOpt = sortEl.querySelector('option[value="edge"]');
+    edgeOpt.hidden = !hasCompare; edgeOpt.disabled = !hasCompare;
+    if (!hasCompare && state.sort === "edge") { state.sort = "time"; sortEl.value = "time"; }
+
+    var now = Date.now();
+    var generated = new Date(DATA.generated_at).getTime();
+    var age = now - generated;
+    var fresh = document.getElementById("freshness");
+    fresh.textContent = "Odds from " + DATA.sharp_book + ", pulled " + ageText(age) + "." +
+      (age > 6 * 3600000 ? " Prices may have moved. Run the script again." : "");
+    fresh.className = "freshness" + (age > 6 * 3600000 ? " stale" : "");
+
+    var upcoming = DATA.rows.filter(function (r) { return new Date(r.start).getTime() > now; });
+    var horizon = state.within ? now + state.within * 3600000 : Infinity;
+    var inWindow = upcoming.filter(function (r) { return new Date(r.start).getTime() <= horizon; });
+    var rows = inWindow
+      .filter(function (r) { return state.sports.indexOf(r.sport) !== -1 && r.p * 100 >= state.minProb; })
+      .map(compute);
+
+    rows.sort(function (a, b) {
+      if (state.sort === "edge") {
+        var ea = a.edge == null ? -Infinity : a.edge, eb = b.edge == null ? -Infinity : b.edge;
+        if (ea !== eb) return eb - ea;
+      } else if (state.sort === "prob") {
+        if (a.r.p !== b.r.p) return b.r.p - a.r.p;
+      }
+      return new Date(a.r.start) - new Date(b.r.start);
+    });
+
+    var tbody = document.getElementById("rows");
+    tbody.textContent = "";
+    var frag = document.createDocumentFragment();
+    rows.forEach(function (c) { frag.appendChild(buildRow(c)); });
+    tbody.appendChild(frag);
+
+    var hits = rows.filter(function (c) { return c.hit; }).length;
+    var withB = rows.filter(function (c) { return c.r.bet365 != null; }).length;
+    var summary = document.getElementById("summary");
+    var empty = document.getElementById("empty");
+    var wrap = document.getElementById("table-wrap");
+
+    if (!rows.length) {
+      wrap.hidden = true; empty.hidden = false; summary.textContent = "";
+      empty.textContent = !upcoming.length
+        ? "No upcoming games in this data. Run the script again to refresh it."
+        : !inWindow.length
+          ? "No games start within that window. Try a longer one."
+          : "No picks match your filters. Lower the probability cutoff, or turn on more sports.";
+    } else {
+      wrap.hidden = false; empty.hidden = true;
+      summary.textContent = rows.length + (rows.length === 1 ? " pick. " : " picks. ") +
+        (withB ? hits + " of " + withB + " Bet365 prices meet your " + state.edge + "% edge." : "Compare the min odds with the prices at your book.");
+    }
+  }
+
+  render();
+  setInterval(render, 60000);   // keeps the pull time fresh and drops games that have started
+})();
+</script>
+</body>
+</html>

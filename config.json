@@ -1,0 +1,74 @@
+{
+  "_notes": "All IDs confirmed with --find-tournaments except Liga MX, which still needs adding. OddsPapi allows at most 5 leagues per request, so extra leagues are split across requests automatically. Set compare_book to \"bet365\" to also fetch Bet365 prices (one extra request per group, and it must be on your plan). Set combine_sports to true to pack leagues from all sports together, 5 per request (9 leagues = 2 requests instead of 5). The --live run warns you if the spread signs look reversed.",
+  "sharp_book": "pinnacle",
+  "sharp_label": "Pinnacle",
+  "compare_book": null,
+  "max_requests_per_run": 10,
+  "request_gap_seconds": 1.1,
+  "market_types": [
+    "moneyline",
+    "1x2",
+    "totals",
+    "spreads",
+    "btts",
+    "corners_totals"
+  ],
+  "periods": [
+    "result",
+    "fulltime"
+  ],
+  "min_minutes_to_start": 10,
+  "tournaments": {
+    "Soccer": [
+      {
+        "id": 27464,
+        "name": "Liga MX (Mexico)"
+      },
+      {
+        "id": 17,
+        "name": "Premier League (England)"
+      },
+      {
+        "id": 8,
+        "name": "LaLiga (Spain)"
+      },
+      {
+        "id": 7,
+        "name": "UEFA Champions League"
+      },
+      {
+        "id": 679,
+        "name": "UEFA Europa League"
+      },
+      {
+        "id": 34480,
+        "name": "UEFA Conference League"
+      }
+    ],
+    "Football": [
+      {
+        "id": 31,
+        "name": "NFL"
+      }
+    ],
+    "Baseball": [
+      {
+        "id": 109,
+        "name": "MLB"
+      }
+    ],
+    "Basketball": [
+      {
+        "id": 132,
+        "name": "NBA"
+      }
+    ],
+    "Hockey": [
+      {
+        "id": 234,
+        "name": "NHL"
+      }
+    ]
+  },
+  "combine_sports": false
+}
