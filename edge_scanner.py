@@ -42,6 +42,7 @@ import getpass
 import hashlib
 import json
 import os
+import re
 import sys
 import time
 import urllib.error
@@ -236,11 +237,18 @@ def _read_dotenv():
     return None
 
 
+def _clean_key(key):
+    """Removes spaces, line breaks and quote marks around a pasted key (a common copy-and-paste slip)."""
+    if not key:
+        return None
+    return key.strip().strip("\"'").strip() or None
+
+
 def get_api_key():
     key = os.environ.get("ODDSPAPI_KEY") or _read_dotenv()
     if not key and sys.stdin.isatty():
         key = getpass.getpass("Paste your OddsPapi key (it won't be shown or saved): ")
-    return key.strip() if key else None
+    return _clean_key(key)
 
 
 # --------------------------------------------------------------------------
@@ -324,6 +332,10 @@ def make_client(cfg):
         raise SystemExit(
             "No API key found. Set ODDSPAPI_KEY, or create a file named .env next to this script "
             "containing:  ODDSPAPI_KEY=your-key")
+    looks_ok = re.fullmatch(r"[0-9a-fA-F]{8}(-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}", key) is not None
+    print(f"API key found: {len(key)} characters"
+          + ("" if looks_ok else " (keys usually look like xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx, 36 characters; "
+                                 "check it for typos or missing parts)"))
     return Client(key, cfg["base_url"], int(cfg["max_requests_per_run"]), float(cfg.get("request_gap_seconds", 1.1)),
                   float(cfg.get("retry_wait_seconds", 5)))
 
@@ -351,6 +363,50 @@ def quota_text(sub):
 
 # --------------------------------------------------------------------------
 # Setup commands
+def cmd_diagnose(cfg):
+    """Sends three small, free requests and prints how OddsPapi answers each (never prints the key).
+    Meant to be run from GitHub Actions to find out why a run that works on your computer fails there."""
+    import platform
+    base = cfg["base_url"].rstrip("/")
+    key = get_api_key()
+    print(f"Python {platform.python_version()} on {platform.system()}")
+    if key:
+        ok = re.fullmatch(r"[0-9a-fA-F]{8}(-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}", key) is not None
+        print(f"API key found: {len(key)} characters, format {'looks right' if ok else 'is unusual'}")
+    else:
+        print("No API key found (is the ODDSPAPI_KEY secret set, with exactly that name?)")
+
+    def probe(label, k, agent):
+        url = f"{base}/v4/account?" + urllib.parse.urlencode({"apiKey": k})
+        req = urllib.request.Request(url, headers={"Accept": "application/json", "User-Agent": agent})
+        try:
+            with urllib.request.urlopen(req, timeout=30) as r:
+                status, body = r.status, r.read().decode("utf-8", "replace")
+        except urllib.error.HTTPError as e:
+            status, body = e.code, e.read().decode("utf-8", "replace")
+        except urllib.error.URLError as e:
+            print(f"  {label}: could not connect ({e.reason})")
+            return
+        if status == 200:
+            try:
+                subs = json.loads(body).get("subscriptions") or [{}]
+                detail = quota_text(subs[0])
+            except (ValueError, AttributeError):
+                detail = ""
+            print(f"  {label}: HTTP 200, works. {detail}")      # the body itself is not printed: it contains the key
+        else:
+            print(f"  {label}: HTTP {status}. {body[:160]}")
+        time.sleep(1.2)
+
+    print("Probes (the account call is free):")
+    if key:
+        probe("1. your key, normal request", key, "edge-scanner/1.0")
+    probe("2. a made-up key", "00000000-0000-0000-0000-000000000000", "edge-scanner/1.0")
+    if key:
+        probe("3. your key, browser-style request", key, "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/124 Safari/537.36")
+
+
+
 # --------------------------------------------------------------------------
 ID_TO_SPORT = {v: k for k, v in SPORT_IDS.items()}
 
@@ -1123,6 +1179,10 @@ def run_tests():
 
     rows = build_rows([ev], devig_power)
     assert len(rows) == 4 and all(0 < r["p"] < 1 for r in rows)
+    # --- pasted keys are cleaned up ---
+    assert _clean_key('  "11111111-2222-3333-4444-555555555555"\n') == "11111111-2222-3333-4444-555555555555"
+    assert _clean_key("'abc'") == "abc" and _clean_key("   ") is None and _clean_key(None) is None
+
     # --- password lock round trip (needs the optional 'cryptography' package) ---
     try:
         from cryptography.hazmat.primitives.ciphers.aead import AESGCM
@@ -1146,6 +1206,7 @@ def main():
     ap = argparse.ArgumentParser(description="Build the edge scanner page.")
     ap.add_argument("--live", action="store_true", help="use real odds from OddsPapi")
     ap.add_argument("--check", action="store_true", help="test your API key and see your plan (free)")
+    ap.add_argument("--diagnose", action="store_true", help="probe OddsPapi's answers to find connection problems (free)")
     ap.add_argument("--find-tournaments", action="store_true", help="list tournament IDs to put in config.json")
     ap.add_argument("--find-markets", metavar="TEXT", help='look up market names, e.g. "corner,both teams" (1 request)')
     ap.add_argument("--build-markets", action="store_true", help="save market definitions to markets_cache.json")
@@ -1166,6 +1227,9 @@ def main():
 
     cfg = load_config()
     now = datetime.now(timezone.utc)
+    if args.diagnose:
+        cmd_diagnose(cfg)
+        return 0
     try:
         if args.check or args.find_tournaments or args.find_markets or args.build_markets or args.build_participants:
             client = make_client(cfg)
