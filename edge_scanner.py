@@ -78,6 +78,14 @@ DEFAULT_CONFIG = {
     "combine_sports": False,           # True = pack leagues from all sports together, 5 per request (saves quota)
     "periods": ["result", "fulltime"],  # full game only (no halves or quarters)
     "min_minutes_to_start": 10,
+    "compare_label": None,             # name shown for the comparison book, e.g. "Betano MX"
+    "your_book_label": "your book",    # the book you actually bet at, e.g. "Playdoit"
+    "compare_factor": 1.0,             # estimated price at your book = comparison book's price x this (from --compare-books)
+    "compare_spread_pct": 0.0,         # how far apart the two books' prices typically are, in % (from --compare-books)
+    "compare_sports": None,            # (older setting) sports the factor above applies to; None = all sports
+    "compare_by_sport": {},            # per sport, measured with --compare-books: {"Soccer": {"factor": 1.0, "spread_pct": 3.0}}
+    "compare_default": None,           # used for sports not listed above, e.g. {"factor": 1.0, "spread_pct": 5.0}; None = no estimate
+    "calibration_books": ["betano.mx", "betcris", "winpot.mx", "codere.es", "rushbet.co", "bet365"],
     "tournaments": {                    # IDs confirmed with --find-tournaments
         "Soccer": [
             {"id": 17, "name": "Premier League (England)"},
@@ -514,6 +522,29 @@ def cmd_build_markets(client, cfg):
     print(f"Saved to {MARKETS_CACHE_PATH.name}. Requests used this run: {client.count}")
 
 
+def cmd_find_bookmakers(client, cfg, search):
+    """Lists OddsPapi bookmakers whose name or slug contains any comma-separated search word (1 request)."""
+    terms = [t.strip() for t in search.lower().split(",") if t.strip()]
+    data = client.get("/v4/bookmakers")
+    data = data if isinstance(data, list) else []
+    print(f"OddsPapi lists {len(data)} bookmakers.")
+    shown = 0
+    for b in sorted(data, key=lambda x: str(x.get("bookmakerName")).lower()):
+        text = f'{b.get("bookmakerName", "")} {b.get("slug", "")} {b.get("cloneOf") or ""}'.lower()
+        if terms and not any(t in text for t in terms):
+            continue
+        clone = f'  (clone of {b["cloneOf"]})' if b.get("cloneOf") else ""
+        print(f'  {str(b.get("slug")):<26} {b.get("bookmakerName")}{clone}')
+        shown += 1
+        if shown >= 60:
+            print("  ... (narrow the search to see the rest)")
+            break
+    if terms and not shown:
+        print("  (no bookmaker matches that search)")
+    print("Being listed doesn't mean your plan includes it: --check shows the bookmakers on your plan.")
+    print(f"Requests used this run: {client.count}")
+
+
 def cmd_find_markets(client, cfg, search, sport=None):
     """Prints markets whose name contains any of the comma-separated search words. Costs 1 request."""
     terms = [t.strip() for t in search.lower().split(",") if t.strip()]
@@ -656,7 +687,7 @@ def _parse_time(s):
     return datetime.fromisoformat(str(s).replace("Z", "+00:00")).astimezone(timezone.utc)
 
 
-def fixture_to_event(fx, sport, cfg, markets, names, tournament_names, now, stats):
+def fixture_to_event(fx, sport, cfg, markets, names, tournament_names, now, stats, extra_books=()):
     """Turn one fixture from /v4/odds-by-tournaments into the same event shape the sample data uses."""
     if fx.get("statusId") not in (0, 1) or fx.get("hasOdds") is False:
         stats["skipped: not an upcoming game with odds"] += 1
@@ -698,6 +729,7 @@ def fixture_to_event(fx, sport, cfg, markets, names, tournament_names, now, stat
         return None
     sharp_m = _book_markets(books[sharp])
     comp_m = _book_markets(books[compare]) if compare and problem(compare) is None else {}
+    extra_m = {slug: _book_markets(books[slug]) for slug in extra_books if slug in books and problem(slug) is None}
 
     out_markets = []
     ml_prices, spread_h = None, None
@@ -734,11 +766,19 @@ def fixture_to_event(fx, sport, cfg, markets, names, tournament_names, now, stat
             cq = cm["outcomes"].get(o["id"]) if cm and cm["active"] else None
             if cq and not cq["active"]:
                 cq = None
-            outcomes.append({
+            item = {
                 "name": outcome_label(m, o["name"], p1, p2),
                 "sharp": sm["outcomes"][o["id"]]["price"],
                 "bet365": cq["price"] if cq else None,
-            })
+            }
+            if extra_books:
+                others = {}
+                for slug in extra_books:
+                    xm = extra_m.get(slug, {}).get(market_id)
+                    xq = xm["outcomes"].get(o["id"]) if xm and xm["active"] else None
+                    others[slug] = xq["price"] if xq and xq["active"] else None
+                item["others"] = others
+            outcomes.append(item)
         stats["markets kept"] += 1
         if m["type"] in ("moneyline", "1x2"):
             by_name = {str(o["name"]): sm["outcomes"][o["id"]]["price"] for o in m["outcomes"]}
@@ -783,11 +823,17 @@ def _chunks(items, n):
 
 
 def _fetch_book(client, tournaments, slug):
-    """OddsPapi v4 takes exactly one bookmaker per call, in the `bookmaker` parameter."""
-    data = client.get("/v4/odds-by-tournaments", {
-        "tournamentIds": ",".join(str(t["id"]) for t in tournaments),
-        "bookmaker": slug,
-    })
+    """OddsPapi v4 takes exactly one bookmaker per call, in the `bookmaker` parameter.
+    A 404 FIXTURE_NOT_FOUND just means nothing is scheduled for those leagues (off-season, break), so it gives []."""
+    try:
+        data = client.get("/v4/odds-by-tournaments", {
+            "tournamentIds": ",".join(str(t["id"]) for t in tournaments),
+            "bookmaker": slug,
+        })
+    except ApiError as e:
+        if "FIXTURE_NOT_FOUND" in str(e):
+            return []
+        raise
     if isinstance(data, list):
         return data
     return [data] if isinstance(data, dict) and data.get("fixtureId") else []
@@ -814,7 +860,13 @@ def live_events(now, cfg, client):
             parts = _chunks(ts, MAX_TOURNAMENTS_PER_REQUEST)
             groups += [(sp if len(parts) == 1 else f"{sp}, part {i}", c) for i, c in enumerate(parts, 1)]
 
-    needed = len(groups) * (2 if compare else 1)
+    by_sport_cmp, default_cmp = compare_settings(cfg)
+    cmp_sports = None if default_cmp is not None else set(by_sport_cmp)     # None = every sport gets estimates
+
+    def wants_compare(tournaments):
+        return bool(compare) and (cmp_sports is None or any(t_sport.get(t["id"]) in cmp_sports for t in tournaments))
+
+    needed = len(groups) + sum(1 for _, ts in groups if wants_compare(ts))
     if needed > client.max_requests:
         raise SystemExit(f"This run needs {needed} requests but max_requests_per_run is {client.max_requests}. "
                          "Remove a sport or raise the limit in config.json.")
@@ -837,7 +889,7 @@ def live_events(now, cfg, client):
     for label, tournaments in groups:
         fixtures = _fetch_book(client, tournaments, sharp)
         note = ""
-        if compare_ok:
+        if compare_ok and fixtures and wants_compare(tournaments):
             try:
                 extra = {f.get("fixtureId"): f for f in _fetch_book(client, tournaments, compare)}
                 for fx in fixtures:
@@ -859,6 +911,10 @@ def live_events(now, cfg, client):
                 continue
             ev = fixture_to_event(fx, sp, cfg, markets, participants.get(sp, {}), t_names, now, stats)
             if ev:
+                if cmp_sports is not None and sp not in cmp_sports:
+                    for mk in ev["markets"]:             # the factor wasn't measured for this sport, so don't use it
+                        for o in mk["outcomes"]:
+                            o["bet365"] = None
                 events.append(ev)
 
     print("\nWhat happened to the data:")
@@ -900,11 +956,35 @@ def build_rows(events, devig):
                     "p": round(p, 5),
                     "fair": round(1.0 / p, 3),
                     "bet365": o.get("bet365"),
+                    **({"others": o["others"]} if o.get("others") is not None else {}),
                 })
     return rows
 
 
-def write_page(rows, source, devig_name, out_path, sharp_label=SHARP_BOOK, password=None):
+def compare_settings(cfg):
+    """Returns (by_sport, default). Each is {"factor": f, "spread": s} with the spread as a fraction (0.03 = 3%).
+    Sports in by_sport were measured; `default` (or None) is used for the rest. Older single-setting configs still work."""
+    def one(d):
+        return {"factor": float(d.get("factor") or 1.0), "spread": float(d.get("spread_pct") or 0.0) / 100.0}
+    by = {sp: one(v) for sp, v in (cfg.get("compare_by_sport") or {}).items()}
+    default = one(cfg["compare_default"]) if cfg.get("compare_default") else None
+    if not by and default is None and cfg.get("compare_book"):
+        legacy = {"factor": cfg.get("compare_factor"), "spread_pct": cfg.get("compare_spread_pct")}
+        by = {sp: one(legacy) for sp in (cfg.get("compare_sports") or SPORTS)}
+    return by, default
+
+
+def compare_info(cfg):
+    """What the page needs to know about the comparison book (None when none is configured)."""
+    if not cfg.get("compare_book"):
+        return None
+    by, default = compare_settings(cfg)
+    return {"label": cfg.get("compare_label") or cfg["compare_book"],
+            "your_book": cfg.get("your_book_label") or "your book",
+            "by_sport": by, "default": default}
+
+
+def write_page(rows, source, devig_name, out_path, sharp_label=SHARP_BOOK, password=None, compare=None):
     now = datetime.now(timezone.utc)
     sports = list(SPORTS)   # the page greys out sports that have no games in this data
     data = {
@@ -913,6 +993,7 @@ def write_page(rows, source, devig_name, out_path, sharp_label=SHARP_BOOK, passw
         "sharp_book": sharp_label,
         "devig": DEVIG_LABELS[devig_name],
         "sports": sports,
+        "compare": compare,
         "rows": rows,
     }
     # "<" is escaped so team names can never close the <script> tag.
@@ -925,6 +1006,290 @@ def write_page(rows, source, devig_name, out_path, sharp_label=SHARP_BOOK, passw
     if password:
         page = lock_page(page, password)
     Path(out_path).write_text(page, encoding="utf-8")
+
+
+# --------------------------------------------------------------------------
+# Book comparison (which bookmaker's prices move most like yours?)
+# --------------------------------------------------------------------------
+COMPARE_TEMPLATE = r"""<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>Which book prices like yours?</title>
+<style>
+  :root { --chalk:#EEF2F1; --paper:#FFFFFF; --ink:#14262B; --slate:#566A6F; --rule:#D3DDDC; --accent:#2D3FE0; --pine:#17784A; --pine-wash:#E3F3EA; --brick:#B3402F; }
+  @media (prefers-color-scheme: dark) {
+    :root { --chalk:#0E1A1D; --paper:#15262A; --ink:#E6EEEE; --slate:#9BAFB3; --rule:#2A3D41; --accent:#9AA8FF; --pine:#5CCB92; --pine-wash:#16342A; --brick:#F29A8A; }
+  }
+  * { box-sizing: border-box; }
+  body { margin:0; padding:18px; background:var(--chalk); color:var(--ink); font:16px/1.45 system-ui,-apple-system,"Segoe UI",Roboto,Helvetica,Arial,sans-serif; font-variant-numeric: tabular-nums; }
+  main { max-width: 1180px; margin: 0 auto; }
+  h1 { font-size:1.5rem; margin:0 0 6px; }
+  h2 { font-size:1.05rem; margin:22px 0 8px; }
+  p { margin:0 0 10px; color:var(--slate); max-width: 75ch; }
+  .controls { display:flex; flex-wrap:wrap; gap:12px; margin:14px 0; align-items:flex-end; }
+  label { display:block; font-size:.84rem; color:var(--slate); margin-bottom:4px; }
+  select, input, button { font:inherit; min-height:42px; padding:6px 10px; color:var(--ink); background:var(--paper); border:1px solid var(--rule); border-radius:8px; }
+  button { cursor:pointer; }
+  .wrap { background:var(--paper); border:1px solid var(--rule); border-radius:10px; overflow-x:auto; }
+  table { width:100%; border-collapse:collapse; }
+  th, td { padding:9px 12px; text-align:left; border-top:1px solid var(--rule); white-space:nowrap; }
+  thead th { border-top:0; font-size:.84rem; font-weight:500; color:var(--slate); }
+  td.r, th.r { text-align:right; }
+  td small { display:block; color:var(--slate); font-size:.78rem; }
+  td.pick { white-space:normal; min-width:220px; }
+  td.pick b { display:block; }
+  td.pick span { color:var(--slate); font-size:.84rem; }
+  input.my { width:96px; text-align:right; }
+  .best { color:var(--pine); font-weight:700; }
+  .tag { display:inline-block; margin-left:6px; padding:1px 8px; border-radius:999px; background:var(--pine-wash); color:var(--pine); font-size:.78rem; font-weight:500; }
+  .note { font-size:.9rem; }
+  #stats .wrap { margin-bottom:8px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Which book prices like yours?</h1>
+  <p>Open your own book (Playdoit) and type its decimal odds into the last column for picks listed here: same game, same market, same line. Do at least 5, ideally 15 or more, across different games. The table at the top then shows which of the other books moves most like yours, and what scale factor turns its price into an estimate of yours. This page works on your computer only: nothing is uploaded.</p>
+  <div class="controls">
+    <div><label for="sport">Sport</label><select id="sport"></select></div>
+    <div><label for="kind">Type of bet</label><select id="kind"></select></div>
+    <div><label for="within">Starts within</label><select id="within"><option value="24">24 hours</option><option value="48" selected>48 hours</option><option value="0">Any time</option></select></div>
+    <div><button id="clear" type="button">Clear my entries</button></div>
+  </div>
+
+  <section id="stats">
+    <h2>Results from your entries</h2>
+    <div class="wrap"><table><thead><tr>
+      <th>Book</th><th class="r">Picks compared</th><th class="r">Its price vs yours (average)</th><th class="r">Spread (lower is better)</th><th class="r">Estimated yours = book price &times;</th>
+    </tr></thead><tbody id="stat-rows"></tbody></table></div>
+    <p class="note" id="stat-note"></p>
+  </section>
+
+  <h2>Picks</h2>
+  <div class="wrap"><table><thead id="head"></thead><tbody id="rows"></tbody></table></div>
+  <p class="note" id="shown"></p>
+</main>
+
+<script id="data" type="application/json">__DATA_JSON__</script>
+<script>
+(function () {
+  "use strict";
+  var DATA = JSON.parse(document.getElementById("data").textContent);
+  var rows = DATA.rows, books = DATA.books, fairName = DATA.sharp_label;
+  var KEY = "edge-compare-entries-v1";
+  var entries = {};
+  try { entries = JSON.parse(localStorage.getItem(KEY) || "{}") || {}; } catch (e) { entries = {}; }
+  function save() { try { localStorage.setItem(KEY, JSON.stringify(entries)); } catch (e) { /* ignore */ } }
+  function key(r) { return r.id + "@" + r.start; }
+
+  function kind(r) {
+    var m = r.market;
+    if (/^(Moneyline|Match result|3-way)/.test(m)) return "Results";
+    if (/^Total /.test(m)) return "Goal or point totals";
+    if (/^Spread/.test(m)) return "Spreads";
+    if (/^Both teams/.test(m)) return "Both teams to score";
+    if (/^Corners/.test(m)) return "Corners";
+    return "Other";
+  }
+  function el(tag, cls, text) { var n = document.createElement(tag); if (cls) n.className = cls; if (text != null) n.textContent = text; return n; }
+  function fillSelect(id, values, first, preferred) {
+    var s = document.getElementById(id);
+    [first].concat(values).forEach(function (v) { var o = el("option", null, v); o.value = v; s.appendChild(o); });
+    if (preferred && values.indexOf(preferred) !== -1) s.value = preferred;
+    s.addEventListener("change", render);
+  }
+  var sports = []; var kinds = [];
+  rows.forEach(function (r) { if (sports.indexOf(r.sport) === -1) sports.push(r.sport); var k = kind(r); if (kinds.indexOf(k) === -1) kinds.push(k); });
+  fillSelect("sport", sports, "All sports");
+  fillSelect("kind", kinds, "All types", "Results");
+  document.getElementById("within").addEventListener("change", render);
+  document.getElementById("clear").addEventListener("click", function () { entries = {}; save(); render(); });
+
+  var timeFmt = new Intl.DateTimeFormat(undefined, { weekday: "short", hour: "numeric", minute: "2-digit" });
+  function pct(x) { return (x >= 0 ? "+" : "\u2212") + Math.abs(x * 100).toFixed(1) + "%"; }
+
+  // header
+  var head = document.getElementById("head"), htr = el("tr");
+  htr.appendChild(el("th", null, "Pick"));
+  htr.appendChild(el("th", "r", "Fair odds (" + fairName + ")"));
+  books.forEach(function (b) { htr.appendChild(el("th", "r", b)); });
+  htr.appendChild(el("th", "r", "Your book's odds"));
+  head.appendChild(htr);
+
+  function render() {
+    var sport = document.getElementById("sport").value, k = document.getElementById("kind").value;
+    var hours = parseInt(document.getElementById("within").value, 10);
+    var now = Date.now(), horizon = hours ? now + hours * 3600000 : Infinity;
+    var list = rows.filter(function (r) {
+      var t = new Date(r.start).getTime();
+      return t > now && t <= horizon && (sport === "All sports" || r.sport === sport) && (k === "All types" || kind(r) === k);
+    }).sort(function (a, b) { return new Date(a.start) - new Date(b.start); });
+    var total = list.length; list = list.slice(0, 150);
+    var tbody = document.getElementById("rows"); tbody.textContent = "";
+    list.forEach(function (r) {
+      var tr = el("tr");
+      var tdp = el("td", "pick");
+      tdp.appendChild(el("b", null, r.selection));
+      tdp.appendChild(el("span", null, r.event + " | " + r.market + " | " + timeFmt.format(new Date(r.start))));
+      tr.appendChild(tdp);
+      tr.appendChild(el("td", "r", r.fair.toFixed(2)));
+      books.forEach(function (b) {
+        var td = el("td", "r"), p = r.others && r.others[b];
+        if (p) { td.appendChild(document.createTextNode(p.toFixed(2))); td.appendChild(el("small", null, pct(p / r.fair - 1) + " vs fair")); }
+        else { td.textContent = "-"; }
+        tr.appendChild(td);
+      });
+      var tdi = el("td", "r"), inp = document.createElement("input");
+      inp.className = "my"; inp.type = "number"; inp.step = "0.01"; inp.min = "1.01"; inp.setAttribute("inputmode", "decimal");
+      inp.setAttribute("aria-label", "Your book's odds for " + r.selection);
+      if (entries[key(r)]) inp.value = entries[key(r)];
+      inp.addEventListener("input", function () {
+        var v = parseFloat(inp.value);
+        if (v > 1) entries[key(r)] = v; else delete entries[key(r)];
+        save(); stats();
+      });
+      tdi.appendChild(inp); tr.appendChild(tdi);
+      tbody.appendChild(tr);
+    });
+    document.getElementById("shown").textContent = total
+      ? "Showing " + list.length + " of " + total + " picks. Change the filters to see others."
+      : "No picks match these filters. Try 'Any time' or 'All types'.";
+    stats();
+  }
+
+  function stats() {
+    var per = {}; books.forEach(function (b) { per[b] = []; });
+    var vsFair = [];
+    rows.forEach(function (r) {
+      var v = entries[key(r)];
+      if (!(v > 1)) return;
+      vsFair.push(v / r.fair);
+      books.forEach(function (b) { var p = r.others && r.others[b]; if (p) per[b].push(p / v); });
+    });
+    var out = document.getElementById("stat-rows"); out.textContent = "";
+    function mean(a) { return a.reduce(function (s, x) { return s + x; }, 0) / a.length; }
+    function sd(a) { var m = mean(a); return Math.sqrt(a.reduce(function (s, x) { return s + (x - m) * (x - m); }, 0) / Math.max(1, a.length - 1)); }
+
+    var first = el("tr");
+    first.appendChild(el("td", null, "Your book vs " + fairName + " fair odds"));
+    first.appendChild(el("td", "r", String(vsFair.length)));
+    first.appendChild(el("td", "r", vsFair.length ? pct(mean(vsFair) - 1) : "-"));
+    first.appendChild(el("td", "r", "")); first.appendChild(el("td", "r", ""));
+    out.appendChild(first);
+
+    var table = books.map(function (b) {
+      var a = per[b], n = a.length;
+      return { book: b, n: n, avg: n ? mean(a) : null, cv: n >= 2 ? sd(a) / mean(a) : null };
+    });
+    table.sort(function (x, y) {
+      var xo = x.n >= 5, yo = y.n >= 5;
+      if (xo !== yo) return xo ? -1 : 1;
+      if (xo) return x.cv - y.cv;
+      return y.n - x.n;
+    });
+    var best = table.length && table[0].n >= 5 ? table[0].book : null;
+    table.forEach(function (t) {
+      var tr = el("tr"), name = el("td", t.book === best ? "best" : null, t.book);
+      if (t.book === best) name.appendChild(el("span", "tag", "closest"));
+      tr.appendChild(name);
+      tr.appendChild(el("td", "r", String(t.n)));
+      tr.appendChild(el("td", "r", t.n ? pct(t.avg - 1) : "-"));
+      tr.appendChild(el("td", "r", t.cv != null ? (t.cv * 100).toFixed(1) + "%" : "-"));
+      tr.appendChild(el("td", "r", t.n >= 5 ? (1 / t.avg).toFixed(3) : "needs 5+ picks"));
+      out.appendChild(tr);
+    });
+    var note = document.getElementById("stat-note");
+    if (!vsFair.length) note.textContent = "Type your book's odds for a few picks below to see results here.";
+    else if (!best) note.textContent = "Keep going: a book needs at least 5 picks that you and it both have prices for.";
+    else note.textContent = "Spread under about 2% means the book moves closely with yours, so its prices make a decent filter. Over about 4% it isn't a reliable stand-in. Tell the number in the last column to whoever sets up the filter.";
+  }
+  render();
+})();
+</script>
+</body>
+</html>
+"""
+
+
+def compare_books_run(now, cfg, client, book_slugs, sport):
+    """Fetch the sharp book plus each candidate book for one sport and merge their prices per selection.
+    Costs (1 + number of books) requests for every group of up to 5 leagues."""
+    markets = _load_cache(MARKETS_CACHE_PATH, "market definitions", "--build-markets").get("markets", {})
+    participants = _load_cache(PARTICIPANTS_CACHE_PATH, "team names", "--build-participants")
+    sharp = cfg["sharp_book"]
+    books = [b for b in dict.fromkeys(book_slugs) if b and b != sharp]
+    if not books:
+        raise SystemExit('No books to compare. Pass them like:  --compare-books "betano.mx,betcris"')
+    tournaments = cfg["tournaments"].get(sport) or []
+    if not tournaments:
+        raise SystemExit(f"No {sport} tournaments in config.json.")
+    groups = _chunks(tournaments, MAX_TOURNAMENTS_PER_REQUEST)
+    needed = len(groups) * (1 + len(books))
+    if needed > client.max_requests:
+        raise SystemExit(f"This comparison needs {needed} requests (1 + {len(books)} books, for {len(groups)} group(s) of "
+                         f"leagues) but max_requests_per_run is {client.max_requests}. Compare fewer books, or raise "
+                         "max_requests_per_run in config.json for this one run.")
+    try:
+        sub = get_subscription(client)
+    except ApiError:
+        sub = {}
+    limit, used = sub.get("request_limit"), sub.get("request_count")
+    if isinstance(limit, (int, float)) and isinstance(used, (int, float)) and limit - used < needed:
+        raise SystemExit(f"Only {int(limit - used)} requests left on your plan and this needs {needed}. Stopping.")
+    print(f"Comparing {len(books)} books on {sport}: this will use up to {needed} requests"
+          + (f" ({quota_text(sub)} before)." if sub else "."))
+
+    cfg2 = dict(cfg, compare_book=None)
+    stats, events, refused = Counter(), [], set()
+    for chunk in groups:
+        names = {t["id"]: t.get("name") for t in chunk}
+        fixtures = _fetch_book(client, chunk, sharp)
+        by_id = {f.get("fixtureId"): f for f in fixtures}
+        print(f"  {', '.join(str(t.get('name', t['id'])) for t in chunk)}: {sharp} has {len(fixtures)} fixtures")
+        if not fixtures:
+            print("    nothing scheduled here, so the other books are skipped for this group")
+            continue
+        for slug in books:
+            if slug in refused:
+                continue
+            try:
+                extra = _fetch_book(client, chunk, slug)
+            except ApiError as e:
+                if not str(e).startswith("HTTP 4") or str(e).startswith("HTTP 429"):
+                    raise
+                print(f"  {slug}: refused ({e}). Skipping this book.")
+                refused.add(slug)
+                continue
+            print(f"    {slug}: {len(extra)} fixtures")
+            for f in extra:
+                host = by_id.get(f.get("fixtureId"))
+                block = (f.get("bookmakerOdds") or {}).get(slug)
+                if host is not None and block is not None:
+                    host.setdefault("bookmakerOdds", {})[slug] = block
+        for fx in fixtures:
+            ev = fixture_to_event(fx, sport, cfg2, markets, participants.get(sport, {}), names, now, stats,
+                                  extra_books=[b for b in books if b not in refused])
+            if ev:
+                events.append(ev)
+    print(f"Requests used this run: {client.count}")
+    return events, [b for b in books if b not in refused]
+
+
+def write_compare_page(rows, books, out_path, sharp_label):
+    # keep selections that at least two of the books have a price for, so there is something to compare
+    keep = [r for r in rows if sum(1 for b in books if (r.get("others") or {}).get(b)) >= min(2, len(books))]
+    data = {"generated_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"), "sharp_label": sharp_label,
+            "books": books, "rows": keep}
+    payload = json.dumps(data, ensure_ascii=False).replace("<", "\\u003c")
+    Path(out_path).write_text(COMPARE_TEMPLATE.replace("__DATA_JSON__", payload), encoding="utf-8")
+    print(f"\nPrice coverage by book (share of {len(rows)} selections that have a price):")
+    for b in books:
+        have = sum(1 for r in rows if (r.get("others") or {}).get(b))
+        print(f"  {b}: {have} ({(100 * have // len(rows)) if rows else 0}%)")
+    return len(keep)
 
 
 # --------------------------------------------------------------------------
@@ -1179,6 +1544,32 @@ def run_tests():
 
     rows = build_rows([ev], devig_power)
     assert len(rows) == 4 and all(0 < r["p"] < 1 for r in rows)
+    # --- other books' prices are carried alongside the sharp price (used by --compare-books) ---
+    fx10 = fixture()
+    fx10["bookmakerOdds"]["betano.mx"] = _fake_book({111: [(111, 1.50, True), (112, 2.50, True)]})
+    ev10 = fixture_to_event(fx10, "Basketball", cfg, markets, names, tnames, now, Counter(),
+                            extra_books=["betano.mx", "codere.es"])
+    ml10 = ev10["markets"][0]["outcomes"]
+    assert ml10[0]["others"] == {"betano.mx": 1.50, "codere.es": None}, ml10[0]
+    assert ml10[1]["others"]["betano.mx"] == 2.50
+    assert "others" not in fixture_to_event(fixture(), "Basketball", cfg, markets, names, tnames, now, Counter())["markets"][0]["outcomes"][0]
+    assert build_rows([ev10], devig_power)[0]["others"]["betano.mx"] == 1.50
+
+    # --- per-sport comparison settings (and the older single-setting form) ---
+    by, dflt = compare_settings({"compare_book": "betano.mx",
+                                 "compare_by_sport": {"Soccer": {"factor": 1.02, "spread_pct": 3.0}},
+                                 "compare_default": {"factor": 1.0, "spread_pct": 5.0}})
+    assert by == {"Soccer": {"factor": 1.02, "spread": 0.03}} and dflt == {"factor": 1.0, "spread": 0.05}
+    by2, dflt2 = compare_settings({"compare_book": "betano.mx", "compare_factor": 1.0, "compare_spread_pct": 3.0,
+                                   "compare_sports": ["Soccer"]})
+    assert by2 == {"Soccer": {"factor": 1.0, "spread": 0.03}} and dflt2 is None
+    by3, _ = compare_settings({"compare_book": "bet365"})
+    assert set(by3) == set(SPORTS) and by3["Hockey"]["spread"] == 0.0
+    ci = compare_info({"compare_book": "betano.mx", "compare_by_sport": {"Soccer": {"spread_pct": 3.0}},
+                       "compare_default": {"spread_pct": 5.0}, "compare_label": "Betano MX", "your_book_label": "Playdoit"})
+    assert ci["by_sport"]["Soccer"]["spread"] == 0.03 and ci["default"]["spread"] == 0.05 and ci["your_book"] == "Playdoit"
+    assert compare_info({"compare_book": None}) is None
+
     # --- pasted keys are cleaned up ---
     assert _clean_key('  "11111111-2222-3333-4444-555555555555"\n') == "11111111-2222-3333-4444-555555555555"
     assert _clean_key("'abc'") == "abc" and _clean_key("   ") is None and _clean_key(None) is None
@@ -1208,10 +1599,14 @@ def main():
     ap.add_argument("--check", action="store_true", help="test your API key and see your plan (free)")
     ap.add_argument("--diagnose", action="store_true", help="probe OddsPapi's answers to find connection problems (free)")
     ap.add_argument("--find-tournaments", action="store_true", help="list tournament IDs to put in config.json")
+    ap.add_argument("--compare-books", nargs="?", const="default", metavar="BOOKS",
+                    help='compare other books with yours: writes book_compare.html (uses 1 + one request per book; '
+                         'Soccer unless --sport is given). Example: --compare-books "betano.mx,betcris"')
+    ap.add_argument("--find-bookmakers", metavar="TEXT", help='look up bookmaker names, e.g. "playdoit,caliente" (1 request)')
     ap.add_argument("--find-markets", metavar="TEXT", help='look up market names, e.g. "corner,both teams" (1 request)')
     ap.add_argument("--build-markets", action="store_true", help="save market definitions to markets_cache.json")
     ap.add_argument("--build-participants", action="store_true", help="save team names to participants_cache.json")
-    ap.add_argument("--sport", choices=SPORTS, help="limit --find-tournaments / --find-markets / --build-participants to one sport")
+    ap.add_argument("--sport", choices=SPORTS, help="limit --find-tournaments / --find-markets / --build-participants / --compare-books to one sport")
     ap.add_argument("--search", default="", help="with --find-tournaments: only show names containing this text")
     ap.add_argument("--devig", choices=sorted(DEVIG_FUNCS), default="power",
                     help="how to remove the margin (default: power)")
@@ -1231,12 +1626,15 @@ def main():
         cmd_diagnose(cfg)
         return 0
     try:
-        if args.check or args.find_tournaments or args.find_markets or args.build_markets or args.build_participants:
+        if (args.check or args.find_tournaments or args.find_markets or args.find_bookmakers
+                or args.build_markets or args.build_participants):
             client = make_client(cfg)
             if args.check:
                 cmd_check(client, cfg)
             if args.find_tournaments:
                 cmd_find_tournaments(client, cfg, args.sport, args.search)
+            if args.find_bookmakers:
+                cmd_find_bookmakers(client, cfg, args.find_bookmakers)
             if args.find_markets:
                 cmd_find_markets(client, cfg, args.find_markets, args.sport)
             if args.build_markets:
@@ -1245,12 +1643,23 @@ def main():
                 cmd_build_participants(client, cfg, args.sport)
             return 0
 
+        if args.compare_books is not None:
+            client = make_client(cfg)
+            wanted = cfg["calibration_books"] if args.compare_books == "default" else args.compare_books.split(",")
+            sport = args.sport or "Soccer"
+            events, used_books = compare_books_run(now, cfg, client, [w.strip() for w in wanted], sport)
+            out = args.out if args.out != "index.html" else "book_compare.html"
+            kept = write_compare_page(build_rows(events, DEVIG_FUNCS[args.devig]), used_books, out, cfg["sharp_label"])
+            print(f"Wrote {out} with {kept} picks to compare. Open it on your computer.")
+            return 0
+
         if args.live:
             client = make_client(cfg)
             events = live_events(now, cfg, client)
-            source, label = "live", cfg["sharp_label"]
+            source, label, compare = "live", cfg["sharp_label"], compare_info(cfg)
         else:
             events, source, label = sample_events(now), "sample", SHARP_BOOK
+            compare = {"label": "Bet365", "your_book": "your book", "by_sport": {}, "default": {"factor": 1.0, "spread": 0.0}}
     except ApiError as e:
         print(f"Error: {e}", file=sys.stderr)
         return 1
@@ -1261,7 +1670,7 @@ def main():
         password = os.environ.get("PAGE_PASSWORD")
         if not password:
             raise SystemExit("--lock needs the PAGE_PASSWORD environment variable to be set.")
-    write_page(rows, source, args.devig, args.out, label, password)
+    write_page(rows, source, args.devig, args.out, label, password, compare)
     print(f"\nWrote {args.out}: {len(rows)} selections from {len(events)} events "
           f"({source} data, {DEVIG_LABELS[args.devig]}{', password-locked' if password else ''}).")
     if source == "live" and not rows:

@@ -1,8 +1,10 @@
 {
-  "_notes": "All IDs confirmed with --find-tournaments except Liga MX, which still needs adding. OddsPapi allows at most 5 leagues per request, so extra leagues are split across requests automatically. Set compare_book to \"bet365\" to also fetch Bet365 prices (one extra request per group, and it must be on your plan). Set combine_sports to true to pack leagues from all sports together, 5 per request (9 leagues = 2 requests instead of 5). The --live run warns you if the spread signs look reversed.",
+  "_notes": "OddsPapi allows at most 5 leagues per request, so extra leagues are split across requests automatically. combine_sports packs leagues from all sports together, 5 per request. compare_book is the stand-in for the book you bet at: its prices times the factor give the estimated price at your_book_label. compare_by_sport holds what --compare-books measured for each sport (factor, and spread_pct = how far apart the two books' prices typically are). compare_default is a placeholder for sports not measured yet; replace it by adding that sport to compare_by_sport. The --live run warns you if the spread signs look reversed.",
   "sharp_book": "pinnacle",
   "sharp_label": "Pinnacle",
-  "compare_book": null,
+  "compare_book": "betano.mx",
+  "compare_label": "Betano MX",
+  "your_book_label": "Playdoit",
   "max_requests_per_run": 10,
   "request_gap_seconds": 1.1,
   "market_types": [
@@ -70,5 +72,15 @@
       }
     ]
   },
-  "combine_sports": true
+  "combine_sports": true,
+  "compare_by_sport": {
+    "Soccer": {
+      "factor": 1.0,
+      "spread_pct": 3.0
+    }
+  },
+  "compare_default": {
+    "factor": 1.0,
+    "spread_pct": 5.0
+  }
 }

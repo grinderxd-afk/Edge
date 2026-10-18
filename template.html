@@ -116,6 +116,9 @@
   .edge.neg { color: var(--brick); }
   .na { color: var(--slate); }
   body.no-compare .b365 { display: none; }
+  .flag.check { color: var(--amber); background: var(--amber-wash); }
+  tr.check td:first-child { box-shadow: inset 3px 0 0 var(--amber); }
+  .est-note { color: var(--slate); }
   .stake-amt { color: var(--slate); margin-left: 6px; font-size: 0.86rem; }
 
   .empty { padding: 28px 16px; text-align: center; color: var(--slate); background: var(--paper); border: 1px solid var(--rule); border-radius: var(--radius); }
@@ -135,6 +138,7 @@
     }
     td { display: block; padding: 0; border: 0 !important; text-align: left; box-shadow: none !important; }
     tr.hit { border-color: var(--pine); box-shadow: inset 4px 0 0 var(--pine); }
+    tr.check { border-color: var(--amber); box-shadow: inset 4px 0 0 var(--amber); }
     td.event { grid-column: 1 / 4; grid-row: 1; }
     td.pick  { grid-column: 1 / 4; grid-row: 2; padding-bottom: 8px; }
     td.min   { grid-column: 4; grid-row: 1 / 3; text-align: right; align-self: center; }
@@ -181,6 +185,13 @@
         <option value="prob">True probability</option>
       </select>
     </div>
+    <div class="field" id="show-field">
+      <label for="show">Show</label>
+      <select id="show">
+        <option value="flagged">Flagged picks</option>
+        <option value="all">All picks</option>
+      </select>
+    </div>
   </div>
 
   <details class="more">
@@ -220,7 +231,7 @@
           <th scope="col" class="r">True prob.</th>
           <th scope="col" class="r">Fair odds</th>
           <th scope="col" class="r">Min odds</th>
-          <th scope="col" class="r b365">Bet365</th>
+          <th scope="col" class="r b365" id="th-cmp">Bet365</th>
           <th scope="col" class="r">Stake</th>
         </tr>
       </thead>
@@ -233,6 +244,7 @@
     <p><strong>Min odds</strong> is the lowest decimal price worth taking at your book: (1 + minimum edge) ÷ true probability. Use it only on the same market and line, such as the same total or spread number.</p>
     <p><strong>True probability</strong> is the <span id="sharp-name"></span> price with its margin removed (<span id="devig-name"></span>). It's an estimate, not a certainty.</p>
     <p><strong>Stake</strong> is fractional Kelly sized at the min odds and capped. Better odds than the min mean more edge than you asked for.</p>
+    <p class="est-note" id="est-note" hidden></p>
   </section>
 </main>
 
@@ -250,10 +262,25 @@
     return Math.min(max, Math.max(min, n));
   }
 
+  var CMP = DATA.compare || {};
+  var yourBook = CMP.your_book || "your book";
+  var cmpLabel = CMP.label || "Bet365";
+  var measuredSports = CMP.by_sport || {};
+  function settingsFor(sport) {
+    var m = measuredSports[sport];
+    if (m) return { factor: m.factor > 0 ? m.factor : 1, spread: m.spread > 0 ? m.spread : 0, measured: true };
+    var d = CMP.default;
+    if (d) return { factor: d.factor > 0 ? d.factor : 1, spread: d.spread > 0 ? d.spread : 0, measured: false };
+    return null;                   // no estimate for this sport
+  }
+  // true when the comparison book is only a stand-in for the book you bet at
+  var estimated = Object.keys(measuredSports).some(function (k) { return measuredSports[k].spread > 0; }) ||
+                  !!(CMP.default && CMP.default.spread > 0);
+
   var state = loadState();
 
   function loadState() {
-    var s = { sports: DATA.sports.slice(), edge: 3, within: 48, sort: "time", minProb: 5, kelly: 0.25, cap: 2, bankroll: "" };
+    var s = { sports: DATA.sports.slice(), edge: 3, within: 48, sort: "time", show: "flagged", minProb: 5, kelly: 0.25, cap: 2, bankroll: "" };
     try {
       var saved = JSON.parse(localStorage.getItem(KEY) || "null");
       if (saved && typeof saved === "object") {
@@ -264,6 +291,7 @@
         s.edge = clampNum(saved.edge, 0, 25, s.edge);
         if ([0, 24, 48, 168].indexOf(saved.within) !== -1) s.within = saved.within;
         if (["time", "edge", "prob"].indexOf(saved.sort) !== -1) s.sort = saved.sort;
+        if (saved.show === "flagged" || saved.show === "all") s.show = saved.show;
         s.minProb = clampNum(saved.minProb, 0, 50, s.minProb);
         if (saved.kelly === 0.25 || saved.kelly === 0.5) s.kelly = saved.kelly;
         s.cap = clampNum(saved.cap, 0.1, 25, s.cap);
@@ -350,6 +378,10 @@
   withinEl.value = String(state.within);
   withinEl.addEventListener("change", function () { state.within = parseInt(withinEl.value, 10); saveState(); render(); });
 
+  var showEl = document.getElementById("show");
+  showEl.value = state.show;
+  showEl.addEventListener("change", function () { state.show = showEl.value; saveState(); render(); });
+
   var kellyEl = document.getElementById("kelly");
   kellyEl.value = String(state.kelly);
   kellyEl.addEventListener("change", function () { state.kelly = parseFloat(kellyEl.value); saveState(); render(); });
@@ -371,12 +403,21 @@
   function compute(r) {
     var e = state.edge / 100;
     var min = Math.ceil(((1 + e) / r.p) * 100 - 1e-9) / 100;       // round up to the cent
-    var b = r.bet365;
+    var st = settingsFor(r.sport);
+    var b = (r.bet365 != null && st) ? r.bet365 * st.factor : null;   // estimated price at the book you bet at
+    var tier = null;
+    if (b != null) {
+      if (b >= min * (1 + st.spread) - 1e-9) tier = "likely";
+      else if (st.spread > 0 && b >= min * (1 - st.spread) - 1e-9) tier = "check";
+    }
     var out = {
       r: r,
       min: min,
+      st: st,
+      est: b,
       edge: b != null ? r.p * b - 1 : null,
-      hit: b != null && b >= min - 1e-9,
+      tier: tier,
+      hit: tier === "likely",
       stake: 0
     };
     var kellyFull = (r.p * min - 1) / (min - 1);                    // sized at the min odds
@@ -387,7 +428,8 @@
   function buildRow(c) {
     var r = c.r;
     var tr = document.createElement("tr");
-    if (c.hit) tr.className = "hit";
+    if (c.tier === "likely") tr.className = "hit";
+    else if (c.tier === "check") tr.className = "check";
 
     var tdEvent = cell("event");
     tdEvent.appendChild(el("div", "event-name", r.event));
@@ -401,7 +443,9 @@
     var tdPick = cell("pick");
     tdPick.appendChild(el("div", "pick-name", r.selection));
     tdPick.appendChild(el("div", "market", r.market));
-    if (c.hit) tdPick.appendChild(el("span", "flag", "Bet365 meets your edge"));
+    var unmeasured = c.st && c.st.spread > 0 && !c.st.measured ? " (not measured yet)" : "";
+    if (c.tier === "likely") tdPick.appendChild(el("span", "flag", c.st.spread > 0 ? "Likely at " + yourBook + unmeasured : cmpLabel + " meets your edge"));
+    else if (c.tier === "check") tdPick.appendChild(el("span", "flag check", "Worth checking at " + yourBook + unmeasured));
 
     var tdProb = cell("stat r", "True prob.");
     tdProb.textContent = pct(r.p);
@@ -412,13 +456,14 @@
     var tdMin = cell("min r", "Min odds");
     tdMin.appendChild(el("span", "num", c.min.toFixed(2)));
 
-    var tdB = cell("stat r b365", "Bet365");
-    if (r.bet365 != null) {
-      tdB.appendChild(el("span", "odds", r.bet365.toFixed(2)));
+    var tdB = cell("stat r b365", estimated ? "Est. " + yourBook : cmpLabel);
+    if (c.est != null) {
+      tdB.setAttribute("title", cmpLabel + " " + r.bet365.toFixed(2) + (c.st.factor !== 1 ? " x " + c.st.factor : ""));
+      tdB.appendChild(el("span", "odds", c.est.toFixed(2)));
       tdB.appendChild(el("span", "edge " + (c.edge >= 0 ? "pos" : "neg"), signedPct(c.edge)));
     } else {
       var na = el("span", "na", "n/a");
-      na.setAttribute("title", "Bet365 price not available");
+      na.setAttribute("title", cmpLabel + " price not available");
       tdB.appendChild(na);
     }
 
@@ -434,9 +479,24 @@
 
   // ---------- render ----------
   function render() {
-    var hasCompare = DATA.rows.some(function (r) { return r.bet365 != null; });
+    var hasCompare = DATA.rows.some(function (r) { return r.bet365 != null && settingsFor(r.sport); });
     document.body.classList.toggle("no-compare", !hasCompare);          // hide the Bet365 column when there's no data for it
+    document.getElementById("th-cmp").textContent = estimated ? "Est. " + yourBook : cmpLabel;
+    document.getElementById("show-field").hidden = !hasCompare;
+    var estNote = document.getElementById("est-note");
+    estNote.hidden = !(hasCompare && estimated);
+    var measuredList = DATA.sports.filter(function (sp) { return measuredSports[sp]; }).map(function (sp) {
+      return sp + " about " + Math.round(measuredSports[sp].spread * 100) + "%";
+    });
+    var unmeasuredList = DATA.sports.filter(function (sp) { return !measuredSports[sp]; });
+    var assumed = CMP.default && unmeasuredList.length
+      ? (measuredList.length ? "; " : "") + unmeasuredList.join(", ") + " not measured yet, so I assume " + Math.round(CMP.default.spread * 100) + "%"
+      : "";
+    estNote.textContent = "Flags are estimates built from " + cmpLabel + " prices. Real prices at " + yourBook +
+      " typically differ from them by: " + measuredList.join(", ") + assumed + ". Likely means the estimate clears your minimum by " +
+      "more than that margin; worth checking means it is within it. Always confirm the price at " + yourBook + " before betting.";
     var edgeOpt = sortEl.querySelector('option[value="edge"]');
+    edgeOpt.textContent = estimated ? "Estimated edge" : cmpLabel + " edge";
     edgeOpt.hidden = !hasCompare; edgeOpt.disabled = !hasCompare;
     if (!hasCompare && state.sort === "edge") { state.sort = "time"; sortEl.value = "time"; }
 
@@ -455,6 +515,10 @@
       .filter(function (r) { return state.sports.indexOf(r.sport) !== -1 && r.p * 100 >= state.minProb; })
       .map(compute);
 
+    var allPicks = rows;
+    var flaggedOnly = hasCompare && state.show === "flagged";
+    if (flaggedOnly) rows = rows.filter(function (c) { return c.tier; });
+
     rows.sort(function (a, b) {
       if (state.sort === "edge") {
         var ea = a.edge == null ? -Infinity : a.edge, eb = b.edge == null ? -Infinity : b.edge;
@@ -471,8 +535,9 @@
     rows.forEach(function (c) { frag.appendChild(buildRow(c)); });
     tbody.appendChild(frag);
 
-    var hits = rows.filter(function (c) { return c.hit; }).length;
-    var withB = rows.filter(function (c) { return c.r.bet365 != null; }).length;
+    var likely = allPicks.filter(function (c) { return c.tier === "likely"; }).length;
+    var checks = allPicks.filter(function (c) { return c.tier === "check"; }).length;
+    var withB = allPicks.filter(function (c) { return c.r.bet365 != null; }).length;
     var summary = document.getElementById("summary");
     var empty = document.getElementById("empty");
     var wrap = document.getElementById("table-wrap");
@@ -483,11 +548,16 @@
         ? "No upcoming games in this data. Run the script again to refresh it."
         : !inWindow.length
           ? "No games start within that window. Try a longer one."
-          : "No picks match your filters. Lower the probability cutoff, or turn on more sports.";
+          : flaggedOnly && allPicks.length
+            ? "Nothing is flagged right now. Switch Show to All picks, or lower the minimum edge."
+            : "No picks match your filters. Lower the probability cutoff, or turn on more sports.";
     } else {
       wrap.hidden = false; empty.hidden = true;
-      summary.textContent = rows.length + (rows.length === 1 ? " pick. " : " picks. ") +
-        (withB ? hits + " of " + withB + " Bet365 prices meet your " + state.edge + "% edge." : "Compare the min odds with the prices at your book.");
+      var tail;
+      if (!withB) tail = "Compare the min odds with the prices at your book.";
+      else if (estimated) tail = likely + " likely and " + checks + " worth checking at " + yourBook + ", out of " + allPicks.length + " picks, at your " + state.edge + "% edge.";
+      else tail = likely + " of " + withB + " " + cmpLabel + " prices meet your " + state.edge + "% edge.";
+      summary.textContent = rows.length + (rows.length === 1 ? " pick shown. " : " picks shown. ") + tail;
     }
   }
 
