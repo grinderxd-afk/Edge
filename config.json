@@ -1,5 +1,5 @@
 {
-  "_notes": "OddsPapi allows at most 5 leagues per request, so extra leagues are split across requests automatically. combine_sports packs leagues from all sports together, 5 per request. compare_book is the stand-in for the book you bet at: its prices times the factor give the estimated price at your_book_label. compare_by_sport holds what --compare-books measured for each sport (factor, and spread_pct = how far apart the two books' prices typically are). compare_default is a placeholder for sports not measured yet; replace it by adding that sport to compare_by_sport. The --live run warns you if the spread signs look reversed.",
+  "_notes": "OddsPapi allows at most 5 leagues per request, so extra leagues are split across requests automatically. combine_sports packs leagues from all sports together, 5 per request. compare_book is the stand-in for the book you bet at: its prices times the factor give the estimated price at your_book_label. compare_by_sport holds what --compare-books measured for each sport (factor, and spread_pct = how far apart the two books' prices typically are). compare_default is a placeholder for sports not measured yet. sharp_extra_books lists more sharp books to average with Pinnacle for the true probability; each one costs 1 extra request per group of leagues, so test a book first with --check-sharp, then add its name, e.g. [\"singbet\"]. The --live run warns you if the spread signs look reversed.",
   "sharp_book": "pinnacle",
   "sharp_label": "Pinnacle",
   "compare_book": "betano.mx",
@@ -82,5 +82,7 @@
   "compare_default": {
     "factor": 1.0,
     "spread_pct": 5.0
-  }
+  },
+  "sharp_extra_books": [],
+  "sharp_weights": {}
 }

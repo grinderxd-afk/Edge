@@ -126,6 +126,38 @@
   .notes { margin: 20px 0 0; color: var(--slate); font-size: 0.88rem; max-width: 70ch; }
   .notes p { margin: 0 0 8px; }
 
+  .why { margin-top: 6px; font-size: 0.88rem; }
+  .why summary { cursor: pointer; color: var(--ultramarine); font-weight: 500; min-height: 28px; }
+  .why ul { margin: 6px 0 0; padding-left: 18px; }
+  .why li { margin: 0 0 4px; }
+  .note-corr { display: block; margin-top: 4px; color: var(--slate); font-size: 0.8rem; }
+
+  .logbox { margin-top: 6px; }
+  .linkbtn { font: inherit; font-size: 0.86rem; font-weight: 500; color: var(--ultramarine); background: none; border: 1px solid var(--rule); border-radius: 8px; padding: 4px 10px; min-height: 34px; cursor: pointer; }
+  .logged { font-size: 0.82rem; color: var(--pine); font-weight: 500; }
+  .logform { display: grid; grid-template-columns: 1fr 1fr; gap: 6px 8px; margin-top: 4px; max-width: 380px; }
+  .logform label { font-size: 0.78rem; color: var(--slate); display: block; }
+  .logform input { width: 100%; min-height: 42px; padding: 6px 8px; font: inherit; font-size: 1rem; color: var(--ink); background: var(--paper); border: 1px solid var(--rule); border-radius: 8px; }
+  .logform .info { grid-column: 1 / -1; font-size: 0.82rem; color: var(--slate); }
+  .logform .btns { grid-column: 1 / -1; display: flex; gap: 8px; }
+  .logform button, .btnrow button, .betcard button { font: inherit; min-height: 42px; padding: 6px 14px; border-radius: 8px; border: 1px solid var(--rule); background: var(--paper); color: var(--ink); cursor: pointer; }
+  .logform button.primary, .btnrow button.primary { background: var(--ink); color: var(--chalk); border-color: var(--ink); font-weight: 700; }
+  #bets { margin: 26px 0 0; }
+  #bets h2 { font-size: 1.15rem; margin: 0 0 6px; }
+  .bet-stats { color: var(--slate); margin: 0 0 10px; }
+  .bet-stats p { margin: 0 0 4px; }
+  .betcard { background: var(--paper); border: 1px solid var(--rule); border-radius: var(--radius); padding: 10px 14px; margin: 0 0 8px; }
+  .betcard .top { display: flex; justify-content: space-between; gap: 10px; }
+  .betcard .name { font-weight: 700; }
+  .betcard .sub { color: var(--slate); font-size: 0.86rem; }
+  .betcard .acts { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+  .betcard .acts button { min-height: 36px; padding: 3px 12px; font-size: 0.9rem; }
+  .res-won { color: var(--pine); font-weight: 700; }
+  .res-lost { color: var(--brick); font-weight: 700; }
+  #move-data { margin-top: 12px; }
+  #move-data textarea { width: 100%; font: 0.82rem/1.3 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; background: var(--paper); color: var(--ink); border: 1px solid var(--rule); border-radius: 8px; padding: 8px; }
+  .btnrow { display: flex; gap: 8px; margin: 8px 0; flex-wrap: wrap; }
+
   /* Phone: each pick becomes a card */
   @media (max-width: 759px) {
     .table-wrap { background: transparent; border: 0; overflow: visible; }
@@ -180,6 +212,7 @@
     <div class="field">
       <label for="sort">Sort by</label>
       <select id="sort">
+        <option value="score">Best first</option>
         <option value="time">Start time</option>
         <option value="edge">Bet365 edge</option>
         <option value="prob">True probability</option>
@@ -188,7 +221,8 @@
     <div class="field" id="show-field">
       <label for="show">Show</label>
       <select id="show">
-        <option value="flagged">Flagged picks</option>
+        <option value="top">Top picks (one per game)</option>
+        <option value="flagged">All flagged picks</option>
         <option value="all">All picks</option>
       </select>
     </div>
@@ -240,11 +274,28 @@
   </div>
   <p class="empty" id="empty" hidden></p>
 
+  <section id="bets" aria-label="My bets">
+    <h2>My bets</h2>
+    <div class="bet-stats" id="bet-stats"></div>
+    <div id="bet-list"></div>
+    <details class="more" id="move-data">
+      <summary>Move data and check results</summary>
+      <p class="est-note">Your bets are saved on this device only. To check closing prices and results, press <strong>Copy my bets</strong>, save the text as a file named bets.json next to edge_scanner.py on your computer, and run <code>python edge_scanner.py --settle-bets bets.json</code>. Then paste the contents of the file it writes (bets_settled.json) into the box and press <strong>Load from box</strong>. The same box backs up your bets and restores them on another device.</p>
+      <textarea id="data-box" rows="6" spellcheck="false" aria-label="Bets data"></textarea>
+      <div class="btnrow">
+        <button type="button" id="copy-bets" class="primary">Copy my bets</button>
+        <button type="button" id="load-bets">Load from box</button>
+      </div>
+      <p class="est-note" id="data-msg" role="status"></p>
+    </details>
+  </section>
+
   <section class="notes" aria-label="How to read this">
     <p><strong>Min odds</strong> is the lowest decimal price worth taking at your book: (1 + minimum edge) ÷ true probability. Use it only on the same market and line, such as the same total or spread number.</p>
     <p><strong>True probability</strong> is the <span id="sharp-name"></span> price with its margin removed (<span id="devig-name"></span>). It's an estimate, not a certainty.</p>
     <p><strong>Stake</strong> is fractional Kelly sized at the min odds and capped. Better odds than the min mean more edge than you asked for.</p>
     <p class="est-note" id="est-note" hidden></p>
+    <p class="est-note" id="top-note" hidden><strong>Top picks</strong> shows the best flagged pick in each game, ranked by a score: the estimated edge at the low end of the margin, scaled down when confidence is lower. Only one pick per game, because picks from the same game are correlated, so betting several is closer to one bigger bet. <strong>Confidence</strong> drops a level for each of these: a sport not yet measured against your book, sharp books that disagree by more than 3 points, corners or both-teams-to-score markets, and games more than 3 days away.</p>
   </section>
 </main>
 
@@ -280,7 +331,7 @@
   var state = loadState();
 
   function loadState() {
-    var s = { sports: DATA.sports.slice(), edge: 3, within: 48, sort: "time", show: "flagged", minProb: 5, kelly: 0.25, cap: 2, bankroll: "" };
+    var s = { sports: DATA.sports.slice(), edge: 3, within: 48, sort: "score", show: "top", minProb: 5, kelly: 0.25, cap: 2, bankroll: "" };
     try {
       var saved = JSON.parse(localStorage.getItem(KEY) || "null");
       if (saved && typeof saved === "object") {
@@ -290,8 +341,8 @@
         }
         s.edge = clampNum(saved.edge, 0, 25, s.edge);
         if ([0, 24, 48, 168].indexOf(saved.within) !== -1) s.within = saved.within;
-        if (["time", "edge", "prob"].indexOf(saved.sort) !== -1) s.sort = saved.sort;
-        if (saved.show === "flagged" || saved.show === "all") s.show = saved.show;
+        if (["score", "time", "edge", "prob"].indexOf(saved.sort) !== -1) s.sort = saved.sort;
+        if (saved.show === "top" || saved.show === "flagged" || saved.show === "all") s.show = saved.show;
         s.minProb = clampNum(saved.minProb, 0, 50, s.minProb);
         if (saved.kelly === 0.25 || saved.kelly === 0.5) s.kelly = saved.kelly;
         s.cap = clampNum(saved.cap, 0.1, 25, s.cap);
@@ -337,6 +388,87 @@
     var h = Math.floor(m / 60);
     if (h < 48) return h + " h ago";
     return Math.floor(h / 24) + " days ago";
+  }
+
+  // ---------- tracked bets (kept on this device only) ----------
+  var BETS_KEY = "edge-scanner-bets-v1";
+  var bets = loadBets();
+  function loadBets() {
+    try {
+      var b = JSON.parse(localStorage.getItem(BETS_KEY) || "[]");
+      return Array.isArray(b) ? b.filter(function (x) { return x && typeof x === "object" && x.id; }) : [];
+    } catch (e) { return []; }
+  }
+  function saveBets() {
+    try { localStorage.setItem(BETS_KEY, JSON.stringify(bets)); } catch (e) { /* storage unavailable */ }
+  }
+  function rowKey(r) { return r.id + "@" + r.start; }
+  function gameKey(r) { return r.sport + "|" + r.event + "|" + r.start; }
+  function sum(a) { return a.reduce(function (s, x) { return s + x; }, 0); }
+  function mean(a) { return a.length ? sum(a) / a.length : 0; }
+  function pts(x) { return (x * 100).toFixed(1) + " points"; }
+  function fmtUnits(x) { return (x >= 0 ? "+" : "\u2212") + Math.abs(x).toFixed(2); }
+
+  function kindOf(market) {
+    var m = String(market || "");
+    if (/^(Moneyline|Match result|3-way|Draw no bet)/.test(m)) return "Results";
+    if (/^Total /.test(m)) return "Totals";
+    if (/^Spread/.test(m)) return "Spreads";
+    if (/^Both teams/.test(m)) return "Both teams to score";
+    if (/^Corners/.test(m)) return "Corners";
+    return "Other";
+  }
+
+  // profit of a settled bet, in the units you staked; null while the bet is still open
+  function resultProfit(b) {
+    var s = Number(b.stake) || 0, o = Number(b.taken_odds) || 0;
+    switch (b.result) {
+      case "won": return s * (o - 1);
+      case "lost": return -s;
+      case "halfwon": return s * (o - 1) / 2;
+      case "halflost": return -s / 2;
+      case "push": return 0;
+      default: return null;
+    }
+  }
+  function stakedOf(b) { return b.result === "push" ? 0 : (Number(b.stake) || 0); }
+  var RESULT_TEXT = { won: "Won", lost: "Lost", push: "Push (stake returned)", halfwon: "Half won", halflost: "Half lost" };
+
+  // How much to trust a flagged pick. Starts at High and drops a level for each weakness.
+  function confidenceFor(r, st) {
+    var level = 2, notes = [];
+    var nb = r.n_books || 1, range = r.p_range || 0;
+    if (st && st.spread > 0 && !st.measured) {
+      level -= 1; notes.push(cmpLabel + " has not been measured against " + yourBook + " for " + r.sport + ", so the margin is assumed");
+    }
+    if (nb > 1) {
+      if (range > 0.03) { level -= 1; notes.push("the sharp books disagree by " + pts(range)); }
+      else notes.push(nb + " sharp books agree within " + pts(range));
+    } else {
+      notes.push("only " + DATA.sharp_book + " priced this market");
+    }
+    var kind = kindOf(r.market);
+    if (kind === "Corners" || kind === "Both teams to score") {
+      level -= 1; notes.push(kind.toLowerCase() + " markets are less efficient, so " + DATA.sharp_book + " is less reliable there");
+    }
+    if (new Date(r.start).getTime() - Date.now() > 72 * 3600000) {
+      level -= 1; notes.push("the game is more than 3 days away and early prices are less accurate");
+    }
+    level = Math.max(0, level);
+    return { level: level, label: ["Low", "Medium", "High"][level], mult: [0.5, 0.75, 1][level], notes: notes };
+  }
+
+  function trackText(r) {
+    var kind = kindOf(r.market);
+    var same = bets.filter(function (b) { return b.sport === r.sport && kindOf(b.market) === kind; });
+    var label = r.sport + " " + kind.toLowerCase();
+    if (!same.length) return "You haven't tracked any " + label + " bets yet, so there is no personal record to lean on.";
+    var withClv = same.filter(function (b) { return typeof b.clv_pct === "number"; });
+    var settled = same.filter(function (b) { return resultProfit(b) != null; });
+    var parts = [same.length + " logged"];
+    if (withClv.length) parts.push("average closing line value " + signedPct(mean(withClv.map(function (b) { return b.clv_pct; }))) + " over " + withClv.length);
+    if (settled.length) parts.push("profit " + fmtUnits(sum(settled.map(resultProfit))) + " over " + settled.length + " settled");
+    return "Your tracked " + label + " bets: " + parts.join(", ") + ".";
   }
 
   // ---------- controls ----------
@@ -410,19 +542,58 @@
       if (b >= min * (1 + st.spread) - 1e-9) tier = "likely";
       else if (st.spread > 0 && b >= min * (1 - st.spread) - 1e-9) tier = "check";
     }
-    var out = {
-      r: r,
-      min: min,
-      st: st,
-      est: b,
+    var low = b != null ? b * (1 - st.spread) : null;                  // the estimate if the real price is at the low end of the margin
+    var lowEdge = low != null ? r.p * low - 1 : null;
+    var conf = b != null ? confidenceFor(r, st) : null;
+    var score = lowEdge == null ? null : (lowEdge > 0 ? lowEdge * conf.mult : lowEdge);
+    var odds = low != null ? low : min;                                // stakes are sized on the cautious price
+    var kelly = odds > 1 ? (r.p * odds - 1) / (odds - 1) : 0;
+    return {
+      r: r, min: min, st: st, est: b,
       edge: b != null ? r.p * b - 1 : null,
-      tier: tier,
-      hit: tier === "likely",
-      stake: 0
+      lowEdge: lowEdge, conf: conf, score: score,
+      tier: tier, hit: tier === "likely",
+      stake: kelly > 0 ? Math.min(state.cap, kelly * state.kelly * 100) : 0,
+      isBest: false, siblings: 0
     };
-    var kellyFull = (r.p * min - 1) / (min - 1);                    // sized at the min odds
-    out.stake = Math.max(0, Math.min(state.cap, kellyFull * state.kelly * 100));
-    return out;
+  }
+
+  var currentMode = "all";
+
+  function buildWhy(c) {
+    var r = c.r, st = c.st, nb = r.n_books || 1;
+    var box = el("details", "why");
+    box.appendChild(el("summary", null, "Why this pick"));
+    var ul = el("ul");
+    function add(text) { ul.appendChild(el("li", null, text)); }
+
+    if (nb > 1) add("True probability " + pct(r.p) + ": a weighted average of " + nb + " sharp books (" + DATA.sharp_book + " alone says " + pct(r.p_main) + "). They differ by " + pts(r.p_range || 0) + ".");
+    else add("True probability " + pct(r.p) + " from " + DATA.sharp_book + " with its margin removed.");
+
+    add("Fair odds are " + r.fair.toFixed(2) + ". Your " + state.edge + "% minimum needs " + c.min.toFixed(2) + ".");
+
+    var how = cmpLabel + " " + r.bet365.toFixed(2) + (st.factor !== 1 ? " x " + st.factor : "");
+    if (st.spread > 0) {
+      add("Estimated price at " + yourBook + " is " + c.est.toFixed(2) + " (" + how + "), an estimated edge of " + signedPct(c.edge) +
+          ". If the real price is " + Math.round(st.spread * 100) + "% lower, the edge is " + signedPct(c.lowEdge) + ".");
+    } else {
+      add("Estimated price " + c.est.toFixed(2) + " (" + how + "), estimated edge " + signedPct(c.edge) + ".");
+    }
+    if (c.tier === "check") add("This one is only worth checking: the estimate is within the margin of your minimum, so confirm the real price first.");
+
+    add("Confidence: " + c.conf.label + (c.conf.notes.length ? " (" + c.conf.notes.join("; ") + ")" : "") + ".");
+
+    if (c.stake > 0) {
+      add("Suggested stake " + c.stake.toFixed(1) + "% of bankroll" +
+          (state.bankroll !== "" ? " (" + Math.round(state.bankroll * c.stake / 100).toLocaleString() + ")" : "") +
+          ": " + (state.kelly === 0.5 ? "half" : "quarter") + " Kelly at the low-end estimate, capped at " + state.cap + "%.");
+    } else {
+      add("No stake suggested until you confirm the real price at " + yourBook + ".");
+    }
+    if (c.siblings) add("Best of " + (c.siblings + 1) + " flagged picks in this game. The others are correlated with it, so betting several is closer to one big bet.");
+    add(trackText(r));
+    box.appendChild(ul);
+    return box;
   }
 
   function buildRow(c) {
@@ -446,6 +617,9 @@
     var unmeasured = c.st && c.st.spread > 0 && !c.st.measured ? " (not measured yet)" : "";
     if (c.tier === "likely") tdPick.appendChild(el("span", "flag", c.st.spread > 0 ? "Likely at " + yourBook + unmeasured : cmpLabel + " meets your edge"));
     else if (c.tier === "check") tdPick.appendChild(el("span", "flag check", "Worth checking at " + yourBook + unmeasured));
+    if (c.tier && currentMode === "flagged" && !c.isBest && c.siblings) tdPick.appendChild(el("span", "note-corr", "Same game as a better pick"));
+    if (c.tier) tdPick.appendChild(buildWhy(c));
+    tdPick.appendChild(buildLogControl(c));
 
     var tdProb = cell("stat r", "True prob.");
     tdProb.textContent = pct(r.p);
@@ -468,21 +642,29 @@
     }
 
     var tdStake = cell("stat r", "Stake");
-    tdStake.appendChild(el("span", "stake-pct", c.stake.toFixed(1) + "%"));
-    if (state.bankroll !== "") {
-      tdStake.appendChild(el("span", "stake-amt", "(" + Math.round(state.bankroll * c.stake / 100).toLocaleString() + ")"));
+    if (c.tier === "check" && c.stake === 0) {
+      tdStake.appendChild(el("span", "stake-pct", "Check price"));
+    } else {
+      tdStake.appendChild(el("span", "stake-pct", c.stake.toFixed(1) + "%"));
+      if (state.bankroll !== "") {
+        tdStake.appendChild(el("span", "stake-amt", "(" + Math.round(state.bankroll * c.stake / 100).toLocaleString() + ")"));
+      }
     }
 
-    [tdEvent, tdPick, tdProb, tdFair, tdMin, tdB, tdStake].forEach(function (t) { tr.appendChild(t); });
+    [tdEvent, tdPick, tdProb, tdFair, tdMin, tdB, tdStake].forEach(function (td) { tr.appendChild(td); });
     return tr;
   }
 
   // ---------- render ----------
+  function scoreOf(c) { return c.score == null ? -Infinity : c.score; }
+
   function render() {
+    formOpen = false;
     var hasCompare = DATA.rows.some(function (r) { return r.bet365 != null && settingsFor(r.sport); });
-    document.body.classList.toggle("no-compare", !hasCompare);          // hide the Bet365 column when there's no data for it
+    document.body.classList.toggle("no-compare", !hasCompare);          // hide the comparison column when there's no data for it
     document.getElementById("th-cmp").textContent = estimated ? "Est. " + yourBook : cmpLabel;
     document.getElementById("show-field").hidden = !hasCompare;
+    document.getElementById("top-note").hidden = !hasCompare;
     var estNote = document.getElementById("est-note");
     estNote.hidden = !(hasCompare && estimated);
     var measuredList = DATA.sports.filter(function (sp) { return measuredSports[sp]; }).map(function (sp) {
@@ -498,7 +680,9 @@
     var edgeOpt = sortEl.querySelector('option[value="edge"]');
     edgeOpt.textContent = estimated ? "Estimated edge" : cmpLabel + " edge";
     edgeOpt.hidden = !hasCompare; edgeOpt.disabled = !hasCompare;
-    if (!hasCompare && state.sort === "edge") { state.sort = "time"; sortEl.value = "time"; }
+    var scoreOpt = sortEl.querySelector('option[value="score"]');
+    scoreOpt.hidden = !hasCompare; scoreOpt.disabled = !hasCompare;
+    if (!hasCompare && (state.sort === "edge" || state.sort === "score")) { state.sort = "time"; sortEl.value = "time"; }
 
     var now = Date.now();
     var generated = new Date(DATA.generated_at).getTime();
@@ -511,16 +695,29 @@
     var upcoming = DATA.rows.filter(function (r) { return new Date(r.start).getTime() > now; });
     var horizon = state.within ? now + state.within * 3600000 : Infinity;
     var inWindow = upcoming.filter(function (r) { return new Date(r.start).getTime() <= horizon; });
-    var rows = inWindow
+    var allPicks = inWindow
       .filter(function (r) { return state.sports.indexOf(r.sport) !== -1 && r.p * 100 >= state.minProb; })
       .map(compute);
 
-    var allPicks = rows;
-    var flaggedOnly = hasCompare && state.show === "flagged";
-    if (flaggedOnly) rows = rows.filter(function (c) { return c.tier; });
+    // picks from the same game are correlated: find the best one in each game
+    var games = {};
+    allPicks.forEach(function (c) { if (c.tier) (games[gameKey(c.r)] = games[gameKey(c.r)] || []).push(c); });
+    Object.keys(games).forEach(function (k) {
+      var g = games[k].sort(function (a, b) { return scoreOf(b) - scoreOf(a); });
+      g.forEach(function (c, i) { c.isBest = i === 0; c.siblings = g.length - 1; });
+    });
+
+    var mode = hasCompare ? state.show : "all";
+    currentMode = mode;
+    var rows;
+    if (mode === "top") rows = allPicks.filter(function (c) { return c.tier === "likely" && c.isBest; });
+    else if (mode === "flagged") rows = allPicks.filter(function (c) { return c.tier; });
+    else rows = allPicks;
 
     rows.sort(function (a, b) {
-      if (state.sort === "edge") {
+      if (state.sort === "score") {
+        if (scoreOf(a) !== scoreOf(b)) return scoreOf(b) - scoreOf(a);
+      } else if (state.sort === "edge") {
         var ea = a.edge == null ? -Infinity : a.edge, eb = b.edge == null ? -Infinity : b.edge;
         if (ea !== eb) return eb - ea;
       } else if (state.sort === "prob") {
@@ -548,21 +745,204 @@
         ? "No upcoming games in this data. Run the script again to refresh it."
         : !inWindow.length
           ? "No games start within that window. Try a longer one."
-          : flaggedOnly && allPicks.length
-            ? "Nothing is flagged right now. Switch Show to All picks, or lower the minimum edge."
-            : "No picks match your filters. Lower the probability cutoff, or turn on more sports.";
+          : mode === "top" && allPicks.length && (likely + checks)
+            ? "No top picks right now: the flagged picks are borderline, within the margin of your minimum. Switch Show to All flagged picks to see them, or lower the minimum edge."
+            : (mode === "top" || mode === "flagged") && allPicks.length
+              ? "Nothing is flagged right now. Switch Show to All picks, or lower the minimum edge."
+              : "No picks match your filters. Lower the probability cutoff, or turn on more sports.";
     } else {
       wrap.hidden = false; empty.hidden = true;
+      var windowText = state.within === 24 ? "starting within 24 hours" : state.within === 48 ? "starting within 48 hours"
+                     : state.within === 168 ? "starting within 7 days" : "at any start time";
       var tail;
-      if (!withB) tail = "Compare the min odds with the prices at your book.";
-      else if (estimated) tail = likely + " likely and " + checks + " worth checking at " + yourBook + ", out of " + allPicks.length + " picks, at your " + state.edge + "% edge.";
-      else tail = likely + " of " + withB + " " + cmpLabel + " prices meet your " + state.edge + "% edge.";
-      summary.textContent = rows.length + (rows.length === 1 ? " pick shown. " : " picks shown. ") + tail;
+      if (mode === "top") tail = rows.length + (rows.length === 1 ? " top pick" : " top picks") + ", one per game, best first (" + windowText + "). " +
+                                 likely + " likely and " + checks + " worth checking in total at your " + state.edge + "% edge.";
+      else if (!withB) tail = rows.length + (rows.length === 1 ? " pick shown. " : " picks shown. ") + "Compare the min odds with the prices at your book.";
+      else if (estimated) tail = rows.length + (rows.length === 1 ? " pick shown. " : " picks shown. ") + likely + " likely and " + checks + " worth checking at " + yourBook + ", out of " + allPicks.length + " picks, at your " + state.edge + "% edge.";
+      else tail = rows.length + (rows.length === 1 ? " pick shown. " : " picks shown. ") + likely + " of " + withB + " " + cmpLabel + " prices meet your " + state.edge + "% edge.";
+      summary.textContent = tail;
     }
   }
 
+  // ---------- tracker: log a bet ----------
+  var formOpen = false;
+
+  function buildLogControl(c) {
+    var r = c.r, key = rowKey(r), wrap = el("div", "logbox");
+    var have = bets.filter(function (b) { return b.key === key; })[0];
+    if (have) {
+      wrap.appendChild(el("span", "logged", "Logged at " + Number(have.taken_odds).toFixed(2)));
+      return wrap;
+    }
+    var btn = el("button", "linkbtn", "Log bet");
+    btn.type = "button";
+    btn.addEventListener("click", function () { wrap.textContent = ""; wrap.appendChild(buildLogForm(c, wrap)); });
+    wrap.appendChild(btn);
+    return wrap;
+  }
+
+  function buildLogForm(c, wrap) {
+    formOpen = true;
+    var r = c.r, form = el("div", "logform");
+    function field(label, value, step) {
+      var box = el("div"), inp = document.createElement("input");
+      box.appendChild(el("label", null, label));
+      inp.type = "number"; inp.step = step; inp.min = "0"; inp.value = value; inp.setAttribute("inputmode", "decimal");
+      box.appendChild(inp); form.appendChild(box);
+      return inp;
+    }
+    var priceIn = field("Price you took at " + yourBook, (c.est != null ? c.est : c.min).toFixed(2), "0.01");
+    var stakeIn = field(state.bankroll !== "" ? "Stake (amount)" : "Stake (units)",
+                        state.bankroll !== "" && c.stake > 0 ? Math.round(state.bankroll * c.stake / 100) : 1, "any");
+    var info = el("div", "info");
+    form.appendChild(info);
+    function update() {
+      var o = parseFloat(priceIn.value);
+      if (!(o > 1)) { info.textContent = "Type the decimal price you actually got."; return; }
+      var kf = (r.p * o - 1) / (o - 1);
+      info.textContent = "Edge at that price: " + signedPct(r.p * o - 1) + (kf > 0
+        ? ". " + (state.kelly === 0.5 ? "Half" : "Quarter") + " Kelly suggests " + Math.min(state.cap, kf * state.kelly * 100).toFixed(1) + "% of bankroll."
+        : ". Not a bet at this price.");
+    }
+    priceIn.addEventListener("input", update);
+    update();
+    var btns = el("div", "btns");
+    var save = el("button", "primary", "Save"); save.type = "button";
+    var cancel = el("button", null, "Cancel"); cancel.type = "button";
+    save.addEventListener("click", function () {
+      var o = parseFloat(priceIn.value), s = parseFloat(stakeIn.value);
+      if (!(o > 1) || !(s > 0)) { info.textContent = "Enter a price above 1 and a stake above 0."; return; }
+      bets.push({
+        id: "b" + Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
+        key: rowKey(r), logged_at: new Date().toISOString(),
+        sport: r.sport, league: r.league, event: r.event, market: r.market, selection: r.selection, start: r.start,
+        fixture_id: r.fixture_id || null, market_id: r.market_id || null, outcome_id: r.outcome_id || null,
+        taken_odds: o, stake: s, p_at_bet: r.p, fair_at_bet: r.fair, edge_at_bet: r.p * o - 1,
+        est_odds: c.est, n_books: r.n_books || 1, result: "pending", clv_pct: null
+      });
+      saveBets();
+      render();
+      renderBets();
+    });
+    cancel.addEventListener("click", function () { formOpen = false; wrap.textContent = ""; wrap.appendChild(buildLogControl(c)); });
+    btns.appendChild(save); btns.appendChild(cancel);
+    form.appendChild(btns);
+    return form;
+  }
+
+  // ---------- tracker: My bets ----------
+  function renderBets() {
+    var stats = document.getElementById("bet-stats"), list = document.getElementById("bet-list");
+    stats.textContent = ""; list.textContent = "";
+    if (!bets.length) {
+      stats.appendChild(el("p", null, "No bets logged yet. Tap Log bet on a pick after you place it, to track your results and how your prices compare with the closing price."));
+      return;
+    }
+    var settled = bets.filter(function (b) { return resultProfit(b) != null; });
+    var staked = sum(settled.map(stakedOf)), profit = sum(settled.map(resultProfit));
+    var withClv = bets.filter(function (b) { return typeof b.clv_pct === "number"; });
+    var line1 = bets.length + " logged, " + settled.length + " settled.";
+    if (settled.length) line1 += " Profit " + fmtUnits(profit) + (staked > 0 ? " on " + staked.toFixed(2) + " staked (ROI " + signedPct(profit / staked) + ")." : ".");
+    stats.appendChild(el("p", null, line1));
+    stats.appendChild(el("p", null, "Average edge when you bet: " + signedPct(mean(bets.map(function (b) { return Number(b.edge_at_bet) || 0; }))) + ", measured against the sharp price at the time."));
+    stats.appendChild(el("p", null, withClv.length
+      ? "Closing line value: average " + signedPct(mean(withClv.map(function (b) { return b.clv_pct; }))) + " over " + withClv.length + " bets. You beat the closing price on " +
+        withClv.filter(function (b) { return b.clv_pct > 0; }).length + " of them."
+      : "Closing line value not checked yet (see Move data and check results below)."));
+    stats.appendChild(el("p", null, "Profit takes hundreds of bets to mean much. Until then, closing line value is the better guide."));
+    bets.slice().sort(function (a, b) { return new Date(b.start) - new Date(a.start); })
+        .forEach(function (b) { list.appendChild(buildBetCard(b)); });
+  }
+
+  function buildBetCard(b) {
+    var card = el("div", "betcard");
+    var top = el("div", "top");
+    var left = el("div");
+    left.appendChild(el("div", "name", b.selection));
+    left.appendChild(el("div", "sub", b.event + " | " + b.market));
+    left.appendChild(el("div", "sub", whenLabel(b.start) + " | " + (b.league || "")));
+    var right = el("div");
+    right.style.textAlign = "right";
+    right.appendChild(el("div", "name", Number(b.taken_odds).toFixed(2)));
+    right.appendChild(el("div", "sub", "Stake " + b.stake));
+    top.appendChild(left); top.appendChild(right);
+    card.appendChild(top);
+
+    var pr = resultProfit(b);
+    var res = el("div", "sub", pr == null ? "Result: pending" : "Result: " + (RESULT_TEXT[b.result] || b.result) + " (" + fmtUnits(pr) + ")");
+    if (pr != null) res.className = "sub " + (pr > 0 ? "res-won" : pr < 0 ? "res-lost" : "");
+    card.appendChild(res);
+    card.appendChild(el("div", "sub", "Edge when logged " + signedPct(Number(b.edge_at_bet) || 0) + (b.n_books > 1 ? " (" + b.n_books + " sharp books)" : "")));
+    card.appendChild(el("div", "sub", typeof b.clv_pct === "number"
+      ? "Closing fair odds " + Number(b.closing_fair).toFixed(2) + ", CLV " + signedPct(b.clv_pct) +
+        (b.closing_minutes_before_kickoff != null ? " (last price " + b.closing_minutes_before_kickoff + " min before kickoff)" : "")
+      : "Closing line value not checked yet"));
+
+    var acts = el("div", "acts");
+    function act(text, fn) { var x = el("button", null, text); x.type = "button"; x.addEventListener("click", fn); acts.appendChild(x); return x; }
+    function setResult(v) { b.result = v; b.settled_by = v === "pending" ? null : "you"; saveBets(); renderBets(); render(); }
+    if (pr == null) {
+      act("Won", function () { setResult("won"); });
+      act("Lost", function () { setResult("lost"); });
+      act("Push", function () { setResult("push"); });
+    } else {
+      act("Undo result", function () { setResult("pending"); });
+    }
+    var rm = act("Remove", function () {
+      if (rm.getAttribute("data-armed")) {
+        bets = bets.filter(function (x) { return x.id !== b.id; });
+        saveBets(); renderBets(); render();
+        return;
+      }
+      rm.setAttribute("data-armed", "1"); rm.textContent = "Tap again to remove";
+      setTimeout(function () { rm.removeAttribute("data-armed"); rm.textContent = "Remove"; }, 3000);
+    });
+    card.appendChild(acts);
+    return card;
+  }
+
+  // ---------- tracker: move data in and out ----------
+  document.getElementById("copy-bets").addEventListener("click", function () {
+    var box = document.getElementById("data-box"), msg = document.getElementById("data-msg");
+    box.value = JSON.stringify({ bets: bets }, null, 1);
+    box.select();
+    function done(ok) { msg.textContent = ok ? "Copied " + bets.length + " bets. Save them as bets.json on your computer." : "Select all the text in the box and copy it."; }
+    try {
+      if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(box.value).then(function () { done(true); }, function () { done(false); });
+      else done(false);
+    } catch (e) { done(false); }
+  });
+
+  document.getElementById("load-bets").addEventListener("click", function () {
+    var box = document.getElementById("data-box"), msg = document.getElementById("data-msg"), raw;
+    try { raw = JSON.parse(box.value); } catch (e) { msg.textContent = "That text isn't valid. Paste the whole contents of the file."; return; }
+    var incoming = Array.isArray(raw) ? raw : (raw && Array.isArray(raw.bets) ? raw.bets : null);
+    if (!incoming) { msg.textContent = "I couldn't find a list of bets in that text."; return; }
+    var updated = 0, added = 0, skipped = 0;
+    incoming.forEach(function (x) {
+      if (!x || typeof x !== "object" || !x.id) { skipped++; return; }
+      var mine = bets.filter(function (b) { return b.id === x.id; })[0];
+      if (mine) {
+        var changed = false;
+        ["closing_p", "closing_fair", "clv_pct", "closing_books", "closing_minutes_before_kickoff"].forEach(function (k) {
+          if (x[k] != null && JSON.stringify(mine[k]) !== JSON.stringify(x[k])) { mine[k] = x[k]; changed = true; }
+        });
+        if ((mine.result == null || mine.result === "pending") && RESULT_TEXT[x.result]) { mine.result = x.result; mine.settled_by = x.settled_by || "import"; changed = true; }
+        if (changed) updated++;
+      } else if (x.event && x.start && Number(x.taken_odds) > 1 && Number(x.stake) > 0) {
+        x.key = x.key || x.id;
+        x.result = x.result || "pending";
+        x.clv_pct = typeof x.clv_pct === "number" ? x.clv_pct : null;
+        bets.push(x); added++;
+      } else { skipped++; }
+    });
+    saveBets(); renderBets(); render();
+    msg.textContent = updated + " bets updated, " + added + " restored, " + skipped + " skipped.";
+  });
+
   render();
-  setInterval(render, 60000);   // keeps the pull time fresh and drops games that have started
+  renderBets();
+  setInterval(function () { if (!formOpen) render(); }, 60000);   // keeps the pull time fresh and drops games that have started
 })();
 </script>
 </body>

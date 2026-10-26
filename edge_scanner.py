@@ -78,6 +78,8 @@ DEFAULT_CONFIG = {
     "combine_sports": False,           # True = pack leagues from all sports together, 5 per request (saves quota)
     "periods": ["result", "fulltime"],  # full game only (no halves or quarters)
     "min_minutes_to_start": 10,
+    "sharp_extra_books": [],           # more sharp books to average with the main one, e.g. ["singbet"] (1 extra request per group each)
+    "sharp_weights": {},               # optional weight per book slug; the main sharp book counts 2 and each extra book 1 by default
     "compare_label": None,             # name shown for the comparison book, e.g. "Betano MX"
     "your_book_label": "your book",    # the book you actually bet at, e.g. "Playdoit"
     "compare_factor": 1.0,             # estimated price at your book = comparison book's price x this (from --compare-books)
@@ -285,7 +287,7 @@ class Client:
         self.count = 0
         self._last = 0.0
 
-    def get(self, path, params=None):
+    def get(self, path, params=None, gap=None):
         billable = path != "/v4/account"
         query = {k: v for k, v in (params or {}).items() if v is not None}
         query["apiKey"] = self.key
@@ -295,7 +297,7 @@ class Client:
         for attempt in range(3):
             if billable and self.count >= self.max_requests:
                 raise ApiError(f"Stopped: reached max_requests_per_run ({self.max_requests}) in config.json.")
-            pause = self.gap - (time.monotonic() - self._last)
+            pause = (self.gap if gap is None else gap) - (time.monotonic() - self._last)
             if pause > 0:
                 time.sleep(pause)
             if billable:
@@ -768,6 +770,7 @@ def fixture_to_event(fx, sport, cfg, markets, names, tournament_names, now, stat
                 cq = None
             item = {
                 "name": outcome_label(m, o["name"], p1, p2),
+                "outcome_id": o["id"],
                 "sharp": sm["outcomes"][o["id"]]["price"],
                 "bet365": cq["price"] if cq else None,
             }
@@ -789,7 +792,7 @@ def fixture_to_event(fx, sport, cfg, markets, names, tournament_names, now, stat
         if any(o["bet365"] is not None for o in outcomes):
             stats["markets with a Bet365 price"] += 1
         out_markets.append(((TYPE_ORDER.get(m["type"], 9), m.get("handicap") or 0),
-                            {"market": label, "outcomes": outcomes}))
+                            {"market": label, "market_id": market_id, "outcomes": outcomes}))
 
     if not out_markets:
         stats["skipped: no usable markets"] += 1
@@ -804,6 +807,7 @@ def fixture_to_event(fx, sport, cfg, markets, names, tournament_names, now, stat
         "sport": sport,
         "league": tournament_names.get(fx.get("tournamentId")) or f"Tournament {fx.get('tournamentId')}",
         "event": f"{p1} vs {p2}",
+        "fixture_id": fx.get("fixtureId"),
         "start": start,
         "markets": [mk for _, mk in out_markets],
     }
@@ -866,7 +870,8 @@ def live_events(now, cfg, client):
     def wants_compare(tournaments):
         return bool(compare) and (cmp_sports is None or any(t_sport.get(t["id"]) in cmp_sports for t in tournaments))
 
-    needed = len(groups) + sum(1 for _, ts in groups if wants_compare(ts))
+    sharp_extras = [b for b in dict.fromkeys(cfg.get("sharp_extra_books") or []) if b and b not in (sharp, compare)]
+    needed = len(groups) * (1 + len(sharp_extras)) + sum(1 for _, ts in groups if wants_compare(ts))
     if needed > client.max_requests:
         raise SystemExit(f"This run needs {needed} requests but max_requests_per_run is {client.max_requests}. "
                          "Remove a sport or raise the limit in config.json.")
@@ -886,9 +891,23 @@ def live_events(now, cfg, client):
     stats = Counter()
     events = []
     compare_ok = bool(compare)
+    active_extras = list(sharp_extras)
     for label, tournaments in groups:
         fixtures = _fetch_book(client, tournaments, sharp)
         note = ""
+        for slug in list(active_extras) if fixtures else []:
+            try:
+                extra = {f.get("fixtureId"): f for f in _fetch_book(client, tournaments, slug)}
+                for fx in fixtures:
+                    block = ((extra.get(fx.get("fixtureId")) or {}).get("bookmakerOdds") or {}).get(slug)
+                    if block is not None:
+                        fx.setdefault("bookmakerOdds", {})[slug] = block
+                note += f" (+{slug})"
+            except ApiError as e:
+                if not str(e).startswith("HTTP 4") or str(e).startswith("HTTP 429"):
+                    raise
+                print(f"  {label}: couldn't get {slug} ({e}). Carrying on without it.")
+                active_extras.remove(slug)
         if compare_ok and fixtures and wants_compare(tournaments):
             try:
                 extra = {f.get("fixtureId"): f for f in _fetch_book(client, tournaments, compare)}
@@ -909,7 +928,8 @@ def live_events(now, cfg, client):
             if not sp:
                 stats["skipped: tournament not in config.json"] += 1
                 continue
-            ev = fixture_to_event(fx, sp, cfg, markets, participants.get(sp, {}), t_names, now, stats)
+            ev = fixture_to_event(fx, sp, cfg, markets, participants.get(sp, {}), t_names, now, stats,
+                                  extra_books=active_extras)
             if ev:
                 if cmp_sports is not None and sp not in cmp_sports:
                     for mk in ev["markets"]:             # the factor wasn't measured for this sport, so don't use it
@@ -937,26 +957,50 @@ def live_events(now, cfg, client):
 # --------------------------------------------------------------------------
 # Build rows and write the page
 # --------------------------------------------------------------------------
-def build_rows(events, devig):
+def build_rows(events, devig, sharp_extra=(), main_slug="pinnacle", weights=None):
+    """One row per selection. The true probability is the weighted average of each sharp book's no-vig probability
+    (the main book counts 2, each extra book 1, unless `weights` says otherwise). A book only counts for a market
+    when it prices every outcome of it. `p_range` is how far apart the books are, as a fraction (0.02 = 2 points)."""
+    weights = weights or {}
+
+    def weight(slug, default):
+        w = weights.get(slug)
+        return float(w) if isinstance(w, (int, float)) and w > 0 else default
+
     rows = []
     for ev in events:
         for mkt in ev["markets"]:
             outcomes = mkt["outcomes"]
-            probs = devig([o["sharp"] for o in outcomes])
-            for o, p in zip(outcomes, probs):
+            main_probs = devig([o["sharp"] for o in outcomes])
+            books = [(main_probs, weight(main_slug, 2.0))]
+            for slug in sharp_extra:
+                prices = [(o.get("others") or {}).get(slug) for o in outcomes]
+                if all(isinstance(x, (int, float)) and x > 1.0 for x in prices):
+                    books.append((devig(prices), weight(slug, 1.0)))
+            total_w = sum(w for _, w in books)
+            for i, o in enumerate(outcomes):
+                per_book = [pb[i] for pb, _ in books]
+                p = sum(pb[i] * w for pb, w in books) / total_w
+                others = {k: v for k, v in (o.get("others") or {}).items() if k not in sharp_extra}
                 rows.append({
                     "id": f'{ev["event"]}|{mkt["market"]}|{o["name"]}',
                     "sport": ev["sport"],
                     "league": ev["league"],
                     "event": ev["event"],
+                    "fixture_id": ev.get("fixture_id"),
+                    "market_id": mkt.get("market_id"),
+                    "outcome_id": o.get("outcome_id"),
                     "start": ev["start"].astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
                     "market": mkt["market"],
                     "selection": o["name"],
                     "sharp": o["sharp"],
                     "p": round(p, 5),
                     "fair": round(1.0 / p, 3),
+                    "p_main": round(main_probs[i], 5),
+                    "n_books": len(books),
+                    "p_range": round(max(per_book) - min(per_book), 5),
                     "bet365": o.get("bet365"),
-                    **({"others": o["others"]} if o.get("others") is not None else {}),
+                    **({"others": others} if others else {}),
                 })
     return rows
 
@@ -1214,19 +1258,21 @@ COMPARE_TEMPLATE = r"""<!doctype html>
 """
 
 
-def compare_books_run(now, cfg, client, book_slugs, sport):
+def compare_books_run(now, cfg, client, book_slug_list, sport, max_groups=None):
     """Fetch the sharp book plus each candidate book for one sport and merge their prices per selection.
     Costs (1 + number of books) requests for every group of up to 5 leagues."""
     markets = _load_cache(MARKETS_CACHE_PATH, "market definitions", "--build-markets").get("markets", {})
     participants = _load_cache(PARTICIPANTS_CACHE_PATH, "team names", "--build-participants")
     sharp = cfg["sharp_book"]
-    books = [b for b in dict.fromkeys(book_slugs) if b and b != sharp]
+    books = [b for b in dict.fromkeys(book_slug_list) if b and b != sharp]
     if not books:
         raise SystemExit('No books to compare. Pass them like:  --compare-books "betano.mx,betcris"')
     tournaments = cfg["tournaments"].get(sport) or []
     if not tournaments:
         raise SystemExit(f"No {sport} tournaments in config.json.")
     groups = _chunks(tournaments, MAX_TOURNAMENTS_PER_REQUEST)
+    if max_groups:
+        groups = groups[:max_groups]
     needed = len(groups) * (1 + len(books))
     if needed > client.max_requests:
         raise SystemExit(f"This comparison needs {needed} requests (1 + {len(books)} books, for {len(groups)} group(s) of "
@@ -1278,6 +1324,48 @@ def compare_books_run(now, cfg, client, book_slugs, sport):
     return events, [b for b in books if b not in refused]
 
 
+def sharp_agreement(events, books, devig):
+    """For each candidate book: how many selections it prices in full, and how far its no-vig probability sits from
+    the main sharp book's (in percentage points)."""
+    out = {b: {"priced": 0, "total": 0, "diffs": []} for b in books}
+    for ev in events:
+        for mkt in ev["markets"]:
+            outs = mkt["outcomes"]
+            main = devig([o["sharp"] for o in outs])
+            for b in books:
+                out[b]["total"] += len(outs)
+                prices = [(o.get("others") or {}).get(b) for o in outs]
+                if all(isinstance(x, (int, float)) and x > 1.0 for x in prices):
+                    out[b]["priced"] += len(outs)
+                    out[b]["diffs"] += [abs(a - c) * 100 for a, c in zip(main, devig(prices))]
+    return out
+
+
+def cmd_check_sharp(now, cfg, client, book_slug_list, sport, devig):
+    """Compares candidate sharp books with the main one (first group of leagues only, 1 + one request per book)."""
+    events, used = compare_books_run(now, cfg, client, book_slug_list, sport, max_groups=1)
+    res = sharp_agreement(events, used, devig)
+    print(f"\nHow each book's probabilities compare with {cfg['sharp_label']} ({sport}, first group of leagues):")
+    for b in used:
+        r = res[b]
+        cov = (100 * r["priced"] // r["total"]) if r["total"] else 0
+        if not r["diffs"]:
+            print(f"  {b}: no complete markets priced. Not usable here.")
+            continue
+        mean = sum(r["diffs"]) / len(r["diffs"])
+        worst = max(r["diffs"])
+        if cov < 50:
+            verdict = "too patchy to rely on"
+        elif mean < 0.3:
+            verdict = "almost a copy of the main book, so it adds little"
+        elif mean <= 2.0:
+            verdict = "a useful second opinion"
+        else:
+            verdict = "differs a lot: probably not as sharp, or defines markets differently"
+        print(f"  {b}: prices {cov}% of selections, average gap {mean:.2f} points, largest {worst:.1f} points: {verdict}")
+    print("(The verdict thresholds are rules of thumb. To use a book, add its name to sharp_extra_books in config.json.)")
+
+
 def write_compare_page(rows, books, out_path, sharp_label):
     # keep selections that at least two of the books have a price for, so there is something to compare
     keep = [r for r in rows if sum(1 for b in books if (r.get("others") or {}).get(b)) >= min(2, len(books))]
@@ -1290,6 +1378,152 @@ def write_compare_page(rows, books, out_path, sharp_label):
         have = sum(1 for r in rows if (r.get("others") or {}).get(b))
         print(f"  {b}: {have} ({(100 * have // len(rows)) if rows else 0}%)")
     return len(keep)
+
+
+# --------------------------------------------------------------------------
+# Settling logged bets: closing line value and results (run on your computer)
+# --------------------------------------------------------------------------
+RESULT_MAP = {"WIN": "won", "LOSE": "lost", "PUSH": "push", "CANCELLED": "push", "HALFWIN": "halfwon", "HALFLOSS": "halflost"}
+HISTORICAL_GAP = 5.2          # OddsPapi asks for 5 seconds between historical-odds calls
+MAX_SETTLE_REQUESTS = 30
+
+
+def _latest_active_before(snapshots, start):
+    """The latest active price recorded at or before kickoff, as (time, price), or None."""
+    best = None
+    for snap in snapshots or []:
+        try:
+            t = _parse_time(snap.get("createdAt"))
+        except (ValueError, TypeError, AttributeError):
+            continue
+        price = snap.get("price")
+        if t <= start and snap.get("active") is not False and isinstance(price, (int, float)) and price > 1.0:
+            if best is None or t > best[0]:
+                best = (t, float(price))
+    return best
+
+
+def closing_probabilities(hist, market_id, outcome_ids, start, devig, books, main_slug, weights=None):
+    """No-vig closing probability for every outcome of one market, averaged over the sharp books that have a
+    closing price for all of its outcomes (the main book counts 2, others 1, unless `weights` says otherwise).
+    Returns (probabilities in the order of outcome_ids, minutes between the last update and kickoff, books used)
+    or None when the main book has no complete closing set."""
+    weights = weights or {}
+    per_book, last_update = [], None
+    for slug in books:
+        outs = (((hist.get("bookmakers") or {}).get(slug) or {}).get("markets") or {}).get(str(market_id), {}).get("outcomes") or {}
+        found = []
+        for oid in outcome_ids:
+            snaps = (((outs.get(str(oid)) or {}).get("players")) or {}).get("0")
+            found.append(_latest_active_before(snaps, start))
+        if any(f is None for f in found):
+            continue
+        w = weights.get(slug)
+        w = float(w) if isinstance(w, (int, float)) and w > 0 else (2.0 if slug == main_slug else 1.0)
+        per_book.append((slug, devig([price for _, price in found]), w))
+        newest = max(t for t, _ in found)
+        last_update = newest if last_update is None or newest > last_update else last_update
+    if not per_book or per_book[0][0] != main_slug:
+        return None
+    total = sum(w for _, _, w in per_book)
+    probs = [sum(pb[i] * w for _, pb, w in per_book) / total for i in range(len(outcome_ids))]
+    minutes = round((start - last_update).total_seconds() / 60) if last_update else None
+    return probs, minutes, [slug for slug, _, _ in per_book]
+
+
+def cmd_settle_bets(client, cfg, path, out_path, now):
+    """Reads bets exported from the page, fetches closing prices (CLV) and results from OddsPapi, and writes the
+    bets back with those filled in. About 2 requests per game you bet on."""
+    raw = json.loads(Path(path).read_text(encoding="utf-8"))
+    bets = raw.get("bets") if isinstance(raw, dict) else raw
+    if not isinstance(bets, list):
+        raise SystemExit("That file doesn't look like exported bets. Use the Copy bets button on the page and save the text.")
+    markets = _load_cache(MARKETS_CACHE_PATH, "market definitions", "--build-markets").get("markets", {})
+    sharp = cfg["sharp_book"]
+    books = ([sharp] + [b for b in (cfg.get("sharp_extra_books") or []) if b and b != sharp])[:3]
+
+    work, skipped = {}, 0
+    for b in bets:
+        try:
+            start = _parse_time(b["start"])
+        except (KeyError, ValueError, TypeError):
+            skipped += 1
+            continue
+        if not (b.get("fixture_id") and b.get("market_id") and b.get("outcome_id")):
+            skipped += 1
+            continue
+        needs_clv = b.get("clv_pct") is None and start <= now
+        needs_result = b.get("result") in (None, "", "pending") and now - start >= timedelta(hours=3)
+        if needs_clv or needs_result:
+            entry = work.setdefault(b["fixture_id"], {"bets": [], "clv": False, "result": False})
+            entry["bets"].append(b)
+            entry["clv"] = entry["clv"] or needs_clv
+            entry["result"] = entry["result"] or needs_result
+    needed = sum(int(e["clv"]) + int(e["result"]) for e in work.values())
+    print(f"{len(bets)} bets read. {len(work)} games need closing prices or results: {needed} requests"
+          + (f" ({skipped} bets skipped: logged by an older page version or missing a start time)." if skipped else "."))
+    if not work:
+        print("Nothing to do yet. Games must have started (and results need about 3 hours after kickoff).")
+        Path(out_path).write_text(json.dumps(bets, indent=2), encoding="utf-8")
+        return
+    if needed > MAX_SETTLE_REQUESTS:
+        raise SystemExit(f"That would use {needed} requests. Settle in smaller batches (at most {MAX_SETTLE_REQUESTS} at a time).")
+    try:
+        sub = get_subscription(client)
+        limit, used = sub.get("request_limit"), sub.get("request_count")
+        if isinstance(limit, (int, float)) and isinstance(used, (int, float)) and limit - used < needed:
+            raise SystemExit(f"Only {int(limit - used)} requests left on your plan and this needs {needed}. Stopping.")
+    except ApiError:
+        pass
+    client.max_requests = max(client.max_requests, needed)
+
+    report = []
+    for fid, entry in work.items():
+        hist = sett = None
+        try:
+            if entry["clv"]:
+                hist = client.get("/v4/historical-odds", {"fixtureId": fid, "bookmakers": ",".join(books)}, gap=HISTORICAL_GAP)
+            if entry["result"]:
+                sett = client.get("/v4/settlements", {"fixtureId": fid})
+        except ApiError as e:
+            if "HTTP 404" in str(e) or "NOT_FOUND" in str(e):
+                print(f"  {fid}: no data available yet, skipped.")
+                continue
+            raise
+        for b in entry["bets"]:
+            start = _parse_time(b["start"])
+            row = {"event": b.get("event"), "selection": b.get("selection"), "taken": b.get("taken_odds")}
+            m = markets.get(str(b["market_id"]))
+            if hist is not None and m is not None and b.get("clv_pct") is None:
+                ids = [o["id"] for o in m["outcomes"]]
+                got = closing_probabilities(hist, b["market_id"], ids, start, DEVIG_FUNCS[cfg.get("devig", "power")],
+                                            books, sharp, cfg.get("sharp_weights"))
+                if got and b["outcome_id"] in ids:
+                    probs, minutes, used_books = got
+                    p_close = probs[ids.index(b["outcome_id"])]
+                    b["closing_p"] = round(p_close, 5)
+                    b["closing_fair"] = round(1.0 / p_close, 3)
+                    b["clv_pct"] = round(float(b["taken_odds"]) * p_close - 1.0, 5)
+                    b["closing_books"] = used_books
+                    b["closing_minutes_before_kickoff"] = minutes
+            if sett is not None and b.get("result") in (None, "", "pending"):
+                res = ((((sett.get("markets") or {}).get(str(b["market_id"])) or {}).get("outcomes") or {})
+                       .get(str(b["outcome_id"])) or {}).get("players", {}).get("0", {}).get("result")
+                if res in RESULT_MAP:
+                    b["result"] = RESULT_MAP[res]
+                    b["settled_by"] = "OddsPapi"
+            row["closing_fair"], row["clv"], row["result"] = b.get("closing_fair"), b.get("clv_pct"), b.get("result")
+            report.append(row)
+    Path(out_path).write_text(json.dumps(bets, indent=2), encoding="utf-8")
+    print("\nEvent | selection | you took | closing fair odds | CLV | result")
+    for r in report:
+        clv = f"{r['clv'] * 100:+.1f}%" if r["clv"] is not None else "n/a"
+        print(f"  {r['event']} | {r['selection']} | {r['taken']} | {r['closing_fair'] or 'n/a'} | {clv} | {r['result'] or 'pending'}")
+    with_clv = [r["clv"] for r in report if r["clv"] is not None]
+    if with_clv:
+        print(f"\nAverage CLV on {len(with_clv)} bets: {sum(with_clv) / len(with_clv) * 100:+.1f}%. "
+              "Positive means you usually got a better price than the sharp closing price.")
+    print(f"Wrote {out_path}. Import it with the page's Import button. Requests used this run: {client.count}")
 
 
 # --------------------------------------------------------------------------
@@ -1570,6 +1804,57 @@ def run_tests():
     assert ci["by_sport"]["Soccer"]["spread"] == 0.03 and ci["default"]["spread"] == 0.05 and ci["your_book"] == "Playdoit"
     assert compare_info({"compare_book": None}) is None
 
+    # --- consensus probability across several sharp books ---
+    base_ev = {"sport": "Basketball", "league": "NBA", "event": "A vs B", "start": now + timedelta(hours=3), "markets": [
+        {"market": "Moneyline", "outcomes": [
+            {"name": "A", "sharp": 1.80, "bet365": None, "others": {"singbet": 1.85, "sbobet": None}},
+            {"name": "B", "sharp": 2.10, "bet365": None, "others": {"singbet": 2.02, "sbobet": None}}]}]}
+    r_one = build_rows([base_ev], devig_power)
+    assert all(r["n_books"] == 1 and r["p_range"] == 0 and r["p"] == r["p_main"] for r in r_one)
+    assert "others" in r_one[0]                                    # kept when it isn't being used as a sharp book
+    r_two = build_rows([base_ev], devig_power, sharp_extra=["singbet", "sbobet"], main_slug="pinnacle")
+    assert all(r["n_books"] == 2 for r in r_two)                   # sbobet has no prices, so it is ignored
+    assert abs(sum(r["p"] for r in r_two) - 1.0) < 1e-3
+    pa_main, pa_sing = devig_power([1.80, 2.10])[0], devig_power([1.85, 2.02])[0]
+    assert abs(r_two[0]["p"] - (2 * pa_main + pa_sing) / 3) < 1e-4  # main book weighs 2, the extra 1
+    assert abs(r_two[0]["p_range"] - abs(pa_main - pa_sing)) < 1e-4
+    assert "others" not in r_two[0] or "singbet" not in r_two[0]["others"]   # raw extra-book prices aren't published
+    r_w = build_rows([base_ev], devig_power, sharp_extra=["singbet"], weights={"pinnacle": 1, "singbet": 1})
+    assert abs(r_w[0]["p"] - (pa_main + pa_sing) / 2) < 1e-4
+
+    # --- agreement statistics for candidate sharp books ---
+    ag = sharp_agreement([base_ev], ["singbet", "sbobet"], devig_power)
+    assert ag["singbet"]["priced"] == 2 and len(ag["singbet"]["diffs"]) == 2 and ag["singbet"]["diffs"][0] > 0
+    assert ag["sbobet"]["priced"] == 0 and ag["sbobet"]["total"] == 2
+
+    # --- closing prices and results for settled bets ---
+    ko = datetime(2026, 5, 1, 18, 0, tzinfo=timezone.utc)
+
+    def snap(minutes_from_ko, price, active=True):
+        return {"createdAt": (ko + timedelta(minutes=minutes_from_ko)).isoformat(), "price": price, "active": active}
+
+    def book_block(prices):
+        return {"markets": {"101": {"outcomes": {str(oid): {"players": {"0": snaps}} for oid, snaps in prices.items()}}}}
+
+    pin = book_block({101: [snap(-120, 2.20), snap(-10, 2.10), snap(1, 9.0, active=False), snap(5, 1.5)],
+                      102: [snap(-60, 3.45)], 103: [snap(-30, 3.70), snap(-8, 3.60)]})
+    assert _latest_active_before(pin["markets"]["101"]["outcomes"]["101"]["players"]["0"], ko) == (ko - timedelta(minutes=10), 2.10)
+    assert _latest_active_before([], ko) is None and _latest_active_before([snap(5, 2.0)], ko) is None
+    want = devig_power([2.10, 3.45, 3.60])
+    got = closing_probabilities({"bookmakers": {"pinnacle": pin}}, 101, [101, 102, 103], ko, devig_power, ["pinnacle"], "pinnacle")
+    assert got and all(abs(a - b) < 1e-12 for a, b in zip(got[0], want)) and got[1] == 8 and got[2] == ["pinnacle"], got
+    sing_full = book_block({101: [snap(-5, 2.00)], 102: [snap(-5, 3.60)], 103: [snap(-5, 3.50)]})
+    sing_part = book_block({101: [snap(-5, 2.00)], 102: [snap(-5, 3.60)]})
+    both = closing_probabilities({"bookmakers": {"pinnacle": pin, "singbet": sing_full}}, 101, [101, 102, 103], ko, devig_power,
+                                 ["pinnacle", "singbet"], "pinnacle")
+    mix = [(2 * a + b) / 3 for a, b in zip(devig_power([2.10, 3.45, 3.60]), devig_power([2.00, 3.60, 3.50]))]
+    assert both and all(abs(a - b) < 1e-12 for a, b in zip(both[0], mix)) and both[2] == ["pinnacle", "singbet"]
+    only_main = closing_probabilities({"bookmakers": {"pinnacle": pin, "singbet": sing_part}}, 101, [101, 102, 103], ko, devig_power,
+                                      ["pinnacle", "singbet"], "pinnacle")
+    assert only_main[2] == ["pinnacle"]                     # a book with an incomplete set is left out
+    assert closing_probabilities({"bookmakers": {"singbet": sing_full}}, 101, [101, 102, 103], ko, devig_power,
+                                 ["pinnacle", "singbet"], "pinnacle") is None   # no main-book close: no CLV
+
     # --- pasted keys are cleaned up ---
     assert _clean_key('  "11111111-2222-3333-4444-555555555555"\n') == "11111111-2222-3333-4444-555555555555"
     assert _clean_key("'abc'") == "abc" and _clean_key("   ") is None and _clean_key(None) is None
@@ -1602,11 +1887,17 @@ def main():
     ap.add_argument("--compare-books", nargs="?", const="default", metavar="BOOKS",
                     help='compare other books with yours: writes book_compare.html (uses 1 + one request per book; '
                          'Soccer unless --sport is given). Example: --compare-books "betano.mx,betcris"')
+    ap.add_argument("--check-sharp", nargs="?", const="default", metavar="BOOKS",
+                    help='test other sharp books against the main one (1 + one request per book; Soccer unless --sport). '
+                         'Example: --check-sharp "singbet,sbobet,betfair-ex"')
+    ap.add_argument("--settle-bets", metavar="FILE",
+                    help="fetch closing prices (CLV) and results for bets exported from the page; "
+                         "writes bets_settled.json (about 2 requests per game)")
     ap.add_argument("--find-bookmakers", metavar="TEXT", help='look up bookmaker names, e.g. "playdoit,caliente" (1 request)')
     ap.add_argument("--find-markets", metavar="TEXT", help='look up market names, e.g. "corner,both teams" (1 request)')
     ap.add_argument("--build-markets", action="store_true", help="save market definitions to markets_cache.json")
     ap.add_argument("--build-participants", action="store_true", help="save team names to participants_cache.json")
-    ap.add_argument("--sport", choices=SPORTS, help="limit --find-tournaments / --find-markets / --build-participants / --compare-books to one sport")
+    ap.add_argument("--sport", choices=SPORTS, help="limit --find-tournaments / --find-markets / --build-participants / --compare-books / --check-sharp to one sport")
     ap.add_argument("--search", default="", help="with --find-tournaments: only show names containing this text")
     ap.add_argument("--devig", choices=sorted(DEVIG_FUNCS), default="power",
                     help="how to remove the margin (default: power)")
@@ -1643,6 +1934,18 @@ def main():
                 cmd_build_participants(client, cfg, args.sport)
             return 0
 
+        if args.check_sharp is not None:
+            client = make_client(cfg)
+            wanted = ["singbet", "sbobet", "betfair-ex"] if args.check_sharp == "default" else args.check_sharp.split(",")
+            cmd_check_sharp(now, cfg, client, [w.strip() for w in wanted], args.sport or "Soccer", DEVIG_FUNCS[args.devig])
+            return 0
+
+        if args.settle_bets:
+            client = make_client(cfg)
+            out = args.out if args.out != "index.html" else "bets_settled.json"
+            cmd_settle_bets(client, dict(cfg, devig=args.devig), args.settle_bets, out, now)
+            return 0
+
         if args.compare_books is not None:
             client = make_client(cfg)
             wanted = cfg["calibration_books"] if args.compare_books == "default" else args.compare_books.split(",")
@@ -1664,7 +1967,9 @@ def main():
         print(f"Error: {e}", file=sys.stderr)
         return 1
 
-    rows = build_rows(events, DEVIG_FUNCS[args.devig])
+    rows = build_rows(events, DEVIG_FUNCS[args.devig],
+                      sharp_extra=(cfg.get("sharp_extra_books") or []) if source == "live" else [],
+                      main_slug=cfg["sharp_book"], weights=cfg.get("sharp_weights"))
     password = None
     if args.lock:
         password = os.environ.get("PAGE_PASSWORD")
